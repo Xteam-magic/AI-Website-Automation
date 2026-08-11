@@ -1,0 +1,216 @@
+خیلی خوب شد که این سوال رو پرسیدی، چون قبل از شروع توسعه، بهتره ساختار Google Sheet کاملاً نهایی بشه. من ستون‌ها رو بر اساس **کل مستندی که با هم نوشتیم** بازبینی کردم و فقط ستون‌هایی رو نگه داشتم که واقعاً در Workflow استفاده می‌شن.
+
+---
+
+# Google Sheet Final Structure (Version 1.0)
+
+| ستون                   | توضیح                                                             |
+| ---------------------- | ----------------------------------------------------------------- |
+| Project ID             | شناسه یکتا پروژه                                                  |
+| Status                 | وضعیت پروژه (Start, Running, Completed, Error, Needs Review و...) |
+| Project Name           | عنوان پروژه                                                       |
+| Required Project Level | High / Medium / Low                                               |
+| User ID                | شناسه کاربر                                                       |
+| User Name              | نام کاربر (اختیاری ولی مفید)                                      |
+| User Phone             | شماره تماس                                                        |
+| User Email             | ایمیل کاربر                                                       |
+| Full Project Doc       | توضیحات کامل پروژه (PRD)                                          |
+| Design System          | قوانین طراحی، Design System و Context                             |
+| Brand Description      | توضیح برند                                                        |
+| Color Palette          | پالت رنگ                                                          |
+| Fonts                  | فونت‌ها                                                           |
+| Language               | زبان پروژه                                                        |
+| Pages                  | لیست صفحات و توضیح هر صفحه                                        |
+| Count Page             | تعداد صفحات                                                       |
+| Source Links           | لینک سایت‌های مرجع                                                |
+| Source Images          | لینک تصاویر مرجع                                                  |
+| Logo URL               | لینک لوگو                                                         |
+| Figma Needed           | Yes / No                                                          |
+| Mobile Version         | Yes / No                                                          |
+| Client Dev Method      | Elementor / HTML / ...                                            |
+| Deadline               | ددلاین                                                            |
+| Project Cost           | هزینه پروژه                                                       |
+| AI Suggestions         | پیشنهادهای AI                                                     |
+| User Suggestions       | پیشنهادهای کاربر                                                  |
+| Payment Status         | وضعیت پرداخت                                                      |
+| User Rate              | امتیاز کاربر                                                      |
+| Design URL             | لینک پروژه UXPilot یا Figma                                       |
+| HTML File              | لینک فایل HTML خروجی                                              |
+| JSON File              | لینک فایل Elementor JSON                                          |
+| Edits After Design     | درخواست‌های ویرایش بعد از طراحی                                   |
+
+---
+
+# ستون‌های جدید برای مدیریت Workflow
+
+این‌ها را حتماً اضافه کن؛ برای Resume و دیباگ بسیار ارزشمندند.
+
+| ستون               | توضیح                                     |
+| ------------------ | ----------------------------------------- |
+| Current Step       | مرحله فعلی (Login، Generate، Export و...) |
+| Current Page       | صفحه‌ای که در حال پردازش است              |
+| Last Run Time      | آخرین زمان شروع اجرا                      |
+| Last Finished Time | آخرین زمان پایان موفق                     |
+| Run ID             | شناسه اجرای GitHub Actions                |
+| Retry Count        | تعداد Retryهای انجام‌شده                  |
+| Last Error         | آخرین خطای ثبت‌شده                        |
+
+---
+
+# مقادیر پیشنهادی Status
+
+به جای آزاد گذاشتن Status، فقط از این مقادیر استفاده کن:
+
+```text
+Start
+
+Running
+
+Generating
+
+Generated
+
+Waiting Export
+
+Completed
+
+Error Login
+
+Error Generate
+
+Error Export
+
+Error Elementor
+
+Needs Review
+
+Paused
+```
+
+این کار باعث می‌شود تصمیم‌گیری Agent ساده‌تر و بدون ابهام باشد.
+
+---
+
+# مقدارهای Current Step
+
+```text
+Idle
+
+Read Sheet
+
+Login
+
+Create Project
+
+Upload Context
+
+Upload Website
+
+Upload Images
+
+Generate Desktop
+
+Generate Mobile
+
+Export HTML
+
+Copy To Figma
+
+Paste Figma
+
+Elementor Convert
+
+Download JSON
+
+Send Email
+
+Update Sheet
+
+Completed
+```
+
+---
+
+# ساختار ستون Pages
+
+پیشنهاد می‌کنم ستون Pages را به‌جای متن ساده، به صورت JSON نگه داری تا Agent راحت‌تر آن را پردازش کند.
+
+مثال:
+
+```json
+[
+  {
+    "page": "Home",
+    "description": "Landing page with hero, features, CTA and testimonials."
+  },
+  {
+    "page": "Pricing",
+    "description": "Pricing table with FAQ and comparison."
+  },
+  {
+    "page": "About",
+    "description": "Company story, mission and team."
+  }
+]
+```
+
+این ساختار برای پروژه‌های چندصفحه‌ای بسیار قابل‌اعتمادتر از جدا کردن متن با Enter یا `|` است.
+
+---
+
+# ساختار پیشنهادی Edits After Design
+
+این ستون را هم بهتر است ساختاریافته نگه داری.
+
+مثلاً:
+
+```json
+[
+  {
+    "page": "Home",
+    "edit": "Improve hero section and change CTA color."
+  },
+  {
+    "page": "Pricing",
+    "edit": "Add annual pricing toggle."
+  }
+]
+```
+
+در این حالت Agent مستقیماً می‌فهمد کدام صفحه باید دوباره Generate شود.
+
+---
+
+# آیا ترتیب آپلود داکیومنت‌ها به Claude مهم است؟
+
+**بله، بهتر است دقیقاً به همین ترتیب باشد:**
+
+1. **Part 1** → معرفی پروژه، هدف، قوانین کلی و Workflow پایه
+2. **Part 2** → منطق کامل اجرای صفحات، Generate، Figma، Elementor و Email
+3. **Part 3** → ساختار Repository، فایل‌ها، ماژول‌ها و ترتیب پیاده‌سازی
+4. **Part 4** → Master Prompt و قوانین تولید کد
+5. **Part 5** → Setup، GitHub Actions، تست، Resume و چک‌لیست نهایی
+
+### بهترین روش استفاده در Claude Code
+
+من پیشنهاد می‌کنم این پنج بخش را **به‌صورت پنج فایل Markdown** با نام‌های زیر ذخیره و به ترتیب به Claude بدهی:
+
+```text
+01_Project_Overview.md
+
+02_Workflow.md
+
+03_Repository_Structure.md
+
+04_Master_Prompt.md
+
+05_Deployment_and_Test.md
+```
+
+و در ابتدای پیام Claude فقط این دستور را بنویسی:
+
+ابتدا کل Repository را ایجاد کن و فقط فایل‌های خالی، ساختار پوشه‌ها، package.json، tsconfig و workflow را بساز. سپس به ترتیب فایل‌ها را کامل کن و بعد از تکمیل هر بخش، Build را اجرا کن، خطاها را رفع کن و سپس به بخش بعدی برو.
+
+> این پنج داکیومنت مرجع کامل پروژه هستند. ابتدا هر پنج فایل را به طور کامل مطالعه و تحلیل کن، سپس وابستگی‌ها و تناقض‌های احتمالی را برطرف کن و بعد از آن بدون استفاده از Placeholder یا TODO، کل پروژه را مرحله‌به‌مرحله پیاده‌سازی کن. قبل از شروع کدنویسی، یک خلاصه از معماری نهایی و برنامه اجرای خود ارائه بده و سپس توسعه را آغاز کن.
+
+این روش باعث می‌شود Claude قبل از تولید کد، کل تصویر پروژه را درک کند و کیفیت خروجی به‌مراتب بهتر از زمانی باشد که هر بخش را جداگانه پردازش کند.
