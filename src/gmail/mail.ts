@@ -1,25 +1,12 @@
-import nodemailer, { Transporter } from "nodemailer";
 import fs from "fs";
 import { config } from "../config/config";
 import { logger } from "../logger/logger";
 import { retry } from "../helpers/retry";
 
-const log = logger.scope("Gmail");
+const log = logger.scope("Email");
 
-let transporter: Transporter | null = null;
-
-function getTransporter(): Transporter {
-  if (!transporter) {
-    transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: config.secrets.gmailEmail,
-        pass: config.secrets.gmailAppPassword,
-      },
-    });
-  }
-  return transporter;
-}
+const RESEND_API_URL = "https://api.resend.com/emails";
+const FROM_EMAIL = "X-Magic Automation <onboarding@resend.dev>";
 
 interface MailAttachment {
   filename: string;
@@ -34,36 +21,69 @@ interface SendMailInput {
 }
 
 /**
- * The only function that actually calls the SMTP transport. Every outgoing
- * email always also goes to the fixed admin address, per project rule.
- * This is the single choke point mail.ts's file-level responsibility
- * ("all project emails only sent from this file") depends on.
+ * Sends project emails through Resend API.
+ * This replaces the previous Gmail SMTP transport.
  */
 async function sendMail(input: SendMailInput): Promise<void> {
-  const recipients = Array.from(new Set([input.to, config.email.adminEmail].filter((e) => !!e)));
+  const recipients = Array.from(
+    new Set(
+      [input.to, config.email.adminEmail].filter(
+        (e): e is string => !!e
+      )
+    )
+  );
 
-  const attachments = (input.attachments ?? []).filter((a) => {
-    const exists = fs.existsSync(a.path);
-    if (!exists) {
-      log.warn(`Attachment not found on disk, skipping: ${a.path}`);
-    }
-    return exists;
-  });
+  const attachments = (input.attachments ?? [])
+    .filter((a) => {
+      const exists = fs.existsSync(a.path);
+
+      if (!exists) {
+        log.warn(`Attachment not found on disk, skipping: ${a.path}`);
+      }
+
+      return exists;
+    })
+    .map((a) => ({
+      filename: a.filename,
+      content: fs.readFileSync(a.path).toString("base64"),
+    }));
 
   await retry(
     async () => {
-      await getTransporter().sendMail({
-        from: config.secrets.gmailEmail,
-        to: recipients.join(","),
-        subject: input.subject,
-        text: input.text,
-        attachments,
+      const response = await fetch(RESEND_API_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${config.secrets.resendApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: FROM_EMAIL,
+          to: recipients,
+          subject: input.subject,
+          text: input.text,
+          ...(attachments.length > 0 ? { attachments } : {}),
+        }),
       });
+
+      const responseText = await response.text();
+
+      if (!response.ok) {
+        throw new Error(
+          `Resend API failed (${response.status}): ${responseText}`
+        );
+      }
+
+      log.info(`Resend accepted email: ${responseText}`);
     },
-    { retries: config.retries.email, label: `Email: ${input.subject}` }
+    {
+      retries: config.retries.email,
+      label: `Email: ${input.subject}`,
+    }
   );
 
-  log.info(`Sent "${input.subject}" to ${recipients.join(", ")}`);
+  log.info(
+    `Sent "${input.subject}" to ${recipients.join(", ")}`
+  );
 }
 
 /** Sent once, when a project is picked up and moves Start -> Running. */
@@ -108,7 +128,7 @@ export async function sendPageStartedEmail(params: {
   });
 }
 
-/** Sent when a single page finishes (Generate + HTML + Figma/Elementor for that page). */
+/** Sent when a single page finishes. */
 export async function sendPageCompletedEmail(params: {
   userEmail: string;
   projectName: string;
@@ -118,8 +138,20 @@ export async function sendPageCompletedEmail(params: {
   jsonFilePath?: string;
 }): Promise<void> {
   const attachments: MailAttachment[] = [];
-  if (params.htmlFilePath) attachments.push({ filename: "index.html", path: params.htmlFilePath });
-  if (params.jsonFilePath) attachments.push({ filename: `${params.pageName}.json`, path: params.jsonFilePath });
+
+  if (params.htmlFilePath) {
+    attachments.push({
+      filename: "index.html",
+      path: params.htmlFilePath,
+    });
+  }
+
+  if (params.jsonFilePath) {
+    attachments.push({
+      filename: `${params.pageName}.json`,
+      path: params.jsonFilePath,
+    });
+  }
 
   await sendMail({
     to: params.userEmail,
@@ -140,7 +172,7 @@ export async function sendPageCompletedEmail(params: {
   });
 }
 
-/** Sent once, when the last page of the project finishes and Status becomes Completed. */
+/** Sent once, when the last page of the project finishes. */
 export async function sendProjectCompletedEmail(params: {
   userEmail: string;
   projectName: string;
@@ -157,7 +189,7 @@ export async function sendProjectCompletedEmail(params: {
   });
 }
 
-/** Sent on any workflow-stopping error, with the last screenshot attached if available. */
+/** Sent on any workflow-stopping error. */
 export async function sendErrorEmail(params: {
   userEmail: string;
   projectName: string;
@@ -167,8 +199,12 @@ export async function sendErrorEmail(params: {
   screenshotPath?: string;
 }): Promise<void> {
   const attachments: MailAttachment[] = [];
+
   if (params.screenshotPath) {
-    attachments.push({ filename: "error-screenshot.png", path: params.screenshotPath });
+    attachments.push({
+      filename: "error-screenshot.png",
+      path: params.screenshotPath,
+    });
   }
 
   await sendMail({
