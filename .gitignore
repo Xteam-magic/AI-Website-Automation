@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.local
+
+# Runtime artifacts (keep the folders, ignore their contents)
+downloads/*
+!downloads/.gitkeep
+screenshots/*
+!screenshots/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Playwright
+test-results/
+playwright-report/
+
+# OS / editor
+.DS_Store
+*.log
+.vscode/
