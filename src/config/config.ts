@@ -126,12 +126,6 @@ export const config = {
     get googleSheetId() {
       return requireEnv("GOOGLE_SHEET_ID");
     },
-    get gmailEmail() {
-      return requireEnv("GMAIL_EMAIL");
-    },
-    get gmailAppPassword() {
-      return requireEnv("GMAIL_APP_PASSWORD");
-    },
     get githubRunId() {
       return optionalEnv("GITHUB_RUN_ID", "local");
     },
