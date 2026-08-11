@@ -1,0 +1,68 @@
+name: AI Website Automation Scheduler
+
+on:
+  schedule:
+    # Runs once every hour, at minute 0
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+
+# Never run two instances at once. If a run is still in progress when the next
+# hour's trigger fires, the new run waits for the previous one to finish rather
+# than starting a second browser in parallel.
+concurrency:
+  group: ai-website-automation
+  cancel-in-progress: false
+
+jobs:
+  run-automation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: npm install
+        run: npm ci
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Automation
+        id: automation
+        env:
+          UX_EMAIL: ${{ secrets.UX_EMAIL }}
+          UX_PASSWORD: ${{ secrets.UX_PASSWORD }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GMAIL_EMAIL: ${{ secrets.GMAIL_EMAIL }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          FIGMA_URL: ${{ secrets.FIGMA_URL }}
+          ELEMENTOR_URL: ${{ secrets.ELEMENTOR_URL }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: npm run build && npm start
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload Screenshots (only on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_id }}
+          path: screenshots/
+          retention-days: 14
+          if-no-files-found: ignore
