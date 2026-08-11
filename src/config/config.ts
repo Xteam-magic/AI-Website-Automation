@@ -126,6 +126,9 @@ export const config = {
     get googleSheetId() {
       return requireEnv("GOOGLE_SHEET_ID");
     },
+    get resendApiKey() {
+  return requireEnv("RESEND_API_KEY");
+},
     get githubRunId() {
       return optionalEnv("GITHUB_RUN_ID", "local");
     },
