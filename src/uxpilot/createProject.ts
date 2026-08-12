@@ -85,11 +85,12 @@ async function uploadImageByUrl(page: Page, triggerLocator: ReturnType<typeof se
 }
 
 async function dismissOptionalPopup(page: Page): Promise<void> {
-  const maybeLaterButton = selectors.maybeLaterButton(page);
+  const maybeLaterButton = selectors.maybeLaterButton(page).first();
 
-  if ((await maybeLaterButton.count()) > 0) {
+  if (await maybeLaterButton.isVisible().catch(() => false)) {
     log.info("Optional UXPilot popup detected. Clicking 'Maybe Later'...");
-    await maybeLaterButton.first().click();
+    await maybeLaterButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 500));
     return;
   }
 
@@ -100,17 +101,30 @@ async function dismissOptionalPopup(page: Page): Promise<void> {
 export async function createProject(page: Page, row: ProjectRow): Promise<void> {
   log.info(`Creating project "${row.projectName}"...`);
 
+  // UXPilot may show an optional promotional popup before project creation.
+  await dismissOptionalPopup(page);
+
   await selectors.createNewButton(page).first().click();
+
+  // The popup can reappear after opening the Create New menu.
+  await dismissOptionalPopup(page);
+
   await selectors.createFileOption(page).first().click();
+
   await selectors.projectNameInput(page).first().fill(row.projectName);
   await selectors.fileContextInput(page).first().fill(row.designSystem);
+
   await selectors.createConfirmButton(page).first().click();
 
-  await waitUntil(async () => (await selectors.editorReadyIndicator(page).count()) > 0, {
-    timeoutMs: config.timeouts.createProjectMs,
-    label: "UXPilot project editor to open",
-  });
+  await waitUntil(
+    async () => (await selectors.editorReadyIndicator(page).count()) > 0,
+    {
+      timeoutMs: config.timeouts.createProjectMs,
+      label: "UXPilot project editor to open",
+    }
+  );
 
+  // Optional popup may also appear after entering the editor.
   await dismissOptionalPopup(page);
 
   log.info("Project created and editor is open.");
