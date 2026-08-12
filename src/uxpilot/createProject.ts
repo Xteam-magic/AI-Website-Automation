@@ -11,9 +11,11 @@ import { ProjectLevel, ProjectRow } from "../types";
 const log = logger.scope("UXPilot/CreateProject");
 
 /**
- * SELECTOR NOTES — same caveat as login.ts: unverified against the live
- * DOM. Isolated here so a failed first run can be fixed by editing only
- * this object.
+ * SELECTOR NOTES
+ * --------------
+ * UXPilot DOM-specific selectors are isolated in this object.
+ * The selectors below are based on the live UXPilot UI observed during
+ * the current automation run.
  */
 const selectors = {
   createNewButton: (page: Page) =>
@@ -37,29 +39,57 @@ const selectors = {
   maybeLaterButton: (page: Page) =>
     page.getByRole("button", { name: /^maybe later$/i }),
 
+  /**
+   * Live UXPilot model button.
+   *
+   * Current visible model values:
+   * Standard
+   * Max
+   * Glide
+   * Glide Pro
+   */
   modelDropdown: (page: Page) =>
     page.getByRole("button", {
       name: /^(Standard|Max|Glide|Glide Pro)$/i,
     }),
 
   /**
-   * UXPilot live model control:
-   * Standard -> Max -> Glide -> Glide Pro
+   * Live UXPilot model slider.
+   *
+   * The supplied DOM showed:
+   * <div class="relative cursor-pointer touch-none">
    */
   modelSlider: (page: Page) =>
-    page.locator("div.relative.cursor-pointer.touch-none").last(),
+    page.locator(
+      "div.relative.cursor-pointer.touch-none"
+    ).last(),
 
   /**
-   * Main UXPilot composer where the logo image must be pasted.
+   * Main UXPilot composer.
+   *
+   * Live DOM observed:
+   * <textarea
+   *   rows="1"
+   *   placeholder="Describe your design, @ to reference images or documents"
+   *   ...
+   * ></textarea>
+   *
+   * We intentionally target the native textarea directly instead of using
+   * a broad text/placeholder locator.
    */
   mainPromptInput: (page: Page) =>
-    page.getByPlaceholder(/Describe your design/i),
+    page.locator(
+      'textarea[placeholder="Describe your design, @ to reference images or documents"]'
+    ),
 
   addWebsiteButton: (page: Page) =>
-    page.getByRole("button", { name: /add website( link)?/i }),
+    page.getByRole("button", {
+      name: /add website( link)?/i,
+    }),
 
   websiteUrlInput: (page: Page) =>
-    page.getByPlaceholder(/https?:\/\//i)
+    page
+      .getByPlaceholder(/https?:\/\//i)
       .or(page.getByLabel(/website|url/i)),
 
   addConfirmButton: (page: Page) =>
@@ -85,16 +115,19 @@ const MODEL_ORDER = [
 ] as const;
 
 /**
- * The project documentation currently maps Low -> Fast,
- * but the live UXPilot UI exposes Standard instead of Fast.
- *
- * Therefore Fast is treated as the live Standard tier.
+ * Project documentation currently uses Fast for Low,
+ * but the live UXPilot UI exposes Standard instead.
  */
 const MODEL_ALIASES: Record<string, string> = {
   Fast: "Standard",
 };
 
-async function downloadToTempFile(url: string): Promise<string> {
+/**
+ * Downloads a remote file into a temporary local file.
+ */
+async function downloadToTempFile(
+  url: string
+): Promise<string> {
   const response = await fetch(url);
 
   if (!response.ok) {
@@ -103,7 +136,9 @@ async function downloadToTempFile(url: string): Promise<string> {
     );
   }
 
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = Buffer.from(
+    await response.arrayBuffer()
+  );
 
   const extension =
     path.extname(new URL(url).pathname) || ".png";
@@ -115,70 +150,109 @@ async function downloadToTempFile(url: string): Promise<string> {
       .slice(2)}${extension}`
   );
 
-  fs.writeFileSync(filePath, buffer);
+  fs.writeFileSync(
+    filePath,
+    buffer
+  );
 
   return filePath;
 }
 
 /**
- * Uploads a reference image by URL.
- * This logic is kept unchanged for non-logo reference images.
+ * Uploads a non-logo reference image.
+ *
+ * This logic is intentionally kept separate from the brand-logo workflow.
  */
 async function uploadImageByUrl(
   page: Page,
-  triggerLocator: ReturnType<typeof selectors.uploadImagesTrigger>,
+  triggerLocator: ReturnType<
+    typeof selectors.uploadImagesTrigger
+  >,
   imageUrl: string
 ): Promise<void> {
   await retry(
     async () => {
-      await triggerLocator.first().click();
+      await triggerLocator
+        .first()
+        .click();
 
       const urlField =
-        page.getByPlaceholder(/https?:\/\//i);
+        page.getByPlaceholder(
+          /https?:\/\//i
+        );
 
-      if ((await urlField.count()) > 0) {
-        await urlField.first().fill(imageUrl);
-        await page.keyboard.press("Enter");
+      if (
+        (await urlField.count()) > 0
+      ) {
+        await urlField
+          .first()
+          .fill(imageUrl);
+
+        await page.keyboard.press(
+          "Enter"
+        );
+
         return;
       }
 
-      const [fileChooser] = await Promise.all([
-        page.waitForEvent("filechooser", {
-          timeout: config.timeouts.imageUploadMs,
-        }),
+      const [fileChooser] =
+        await Promise.all([
+          page.waitForEvent(
+            "filechooser",
+            {
+              timeout:
+                config.timeouts.imageUploadMs,
+            }
+          ),
 
-        triggerLocator
-          .first()
-          .click({ trial: true })
-          .catch(() => undefined),
-      ]);
+          triggerLocator
+            .first()
+            .click({ trial: true })
+            .catch(
+              () => undefined
+            ),
+        ]);
 
       const localPath =
-        await downloadToTempFile(imageUrl);
+        await downloadToTempFile(
+          imageUrl
+        );
 
-      await fileChooser.setFiles(localPath);
+      await fileChooser.setFiles(
+        localPath
+      );
     },
     {
-      retries: config.retries.upload,
-      label: `Upload image: ${imageUrl}`,
+      retries:
+        config.retries.upload,
+      label:
+        `Upload image: ${imageUrl}`,
     }
   );
 }
 
 /**
- * Dismisses the optional promotional UXPilot popup.
+ * Dismisses the optional UXPilot promotional popup.
+ *
+ * The popup may render shortly after page navigation,
+ * so this waits briefly for the button instead of checking
+ * only once.
  */
 async function dismissOptionalPopup(
   page: Page
 ): Promise<void> {
   const maybeLaterButton =
-    selectors.maybeLaterButton(page).first();
+    selectors
+      .maybeLaterButton(page)
+      .first();
 
   try {
-    await maybeLaterButton.waitFor({
-      state: "visible",
-      timeout: 5000,
-    });
+    await maybeLaterButton.waitFor(
+      {
+        state: "visible",
+        timeout: 5000,
+      }
+    );
 
     log.info(
       "Optional UXPilot popup detected. Clicking 'Maybe Later'..."
@@ -191,10 +265,13 @@ async function dismissOptionalPopup(
         state: "hidden",
         timeout: 5000,
       })
-      .catch(() => undefined);
+      .catch(
+        () => undefined
+      );
 
-    await new Promise((resolve) =>
-      setTimeout(resolve, 500)
+    await new Promise(
+      (resolve) =>
+        setTimeout(resolve, 500)
     );
   } catch {
     log.info(
@@ -204,25 +281,29 @@ async function dismissOptionalPopup(
 }
 
 /**
- * Normalizes the model requested by project configuration
- * to the model names actually visible in the live UXPilot UI.
+ * Normalizes the model coming from project configuration
+ * against the live UXPilot model names.
  */
 function normalizeModelName(
   modelName: string
 ): string {
   const normalized =
-    MODEL_ALIASES[modelName] ?? modelName;
+    MODEL_ALIASES[modelName] ??
+    modelName;
 
-  const match = MODEL_ORDER.find(
-    (model) =>
-      model.toLowerCase() ===
-      normalized.toLowerCase()
-  );
+  const match =
+    MODEL_ORDER.find(
+      (model) =>
+        model.toLowerCase() ===
+        normalized.toLowerCase()
+    );
 
   if (!match) {
     throw new Error(
       `Unsupported UXPilot model "${modelName}". ` +
-      `Available live models: ${MODEL_ORDER.join(", ")}`
+        `Available live models: ${MODEL_ORDER.join(
+          ", "
+        )}`
     );
   }
 
@@ -230,22 +311,28 @@ function normalizeModelName(
 }
 
 /**
- * Reads the model currently displayed by the UXPilot button.
+ * Reads the currently displayed model from
+ * the UXPilot model button.
  */
 async function getCurrentModel(
   page: Page
 ): Promise<string> {
   const button =
-    selectors.modelDropdown(page).first();
+    selectors
+      .modelDropdown(page)
+      .first();
 
   const text =
-    (await button.innerText()).trim();
+    (
+      await button.innerText()
+    ).trim();
 
-  const match = MODEL_ORDER.find(
-    (model) =>
-      model.toLowerCase() ===
-      text.toLowerCase()
-  );
+  const match =
+    MODEL_ORDER.find(
+      (model) =>
+        model.toLowerCase() ===
+        text.toLowerCase()
+    );
 
   if (!match) {
     throw new Error(
@@ -257,10 +344,8 @@ async function getCurrentModel(
 }
 
 /**
- * Selects the desired model by clicking the live UXPilot
- * stepper at the exact position of the required step.
- *
- * Actual live order:
+ * Selects the target model using the live
+ * UXPilot 4-step model slider.
  *
  * Standard -> Max -> Glide -> Glide Pro
  */
@@ -273,40 +358,53 @@ async function selectModelUsingSlider(
 
   const currentIndex =
     MODEL_ORDER.indexOf(
-      currentModel as (typeof MODEL_ORDER)[number]
+      currentModel as
+        (typeof MODEL_ORDER)[number]
     );
 
   const targetIndex =
     MODEL_ORDER.indexOf(
-      targetModel as (typeof MODEL_ORDER)[number]
+      targetModel as
+        (typeof MODEL_ORDER)[number]
     );
 
-  if (currentIndex === -1) {
+  if (
+    currentIndex === -1
+  ) {
     throw new Error(
       `Current model "${currentModel}" is not recognized.`
     );
   }
 
-  if (targetIndex === -1) {
+  if (
+    targetIndex === -1
+  ) {
     throw new Error(
       `Target model "${targetModel}" is not recognized.`
     );
   }
 
-  if (currentIndex === targetIndex) {
+  if (
+    currentIndex ===
+    targetIndex
+  ) {
     log.info(
       `Model "${targetModel}" is already selected.`
     );
 
     await page.keyboard
       .press("Escape")
-      .catch(() => undefined);
+      .catch(
+        () => undefined
+      );
 
     return;
   }
 
   const slider =
-    selectors.modelSlider(page).first();
+    selectors
+      .modelSlider(page)
+      .first();
 
   await slider.waitFor({
     state: "visible",
@@ -322,12 +420,22 @@ async function selectModelUsingSlider(
     );
   }
 
+  /**
+   * Live DOM showed a 28px slider thumb.
+   * Four equally spaced model positions:
+   *
+   * 0%     Standard
+   * 33.33% Max
+   * 66.67% Glide
+   * 100%   Glide Pro
+   */
   const thumbWidth = 28;
 
-  const usableWidth = Math.max(
-    box.width - thumbWidth,
-    1
-  );
+  const usableWidth =
+    Math.max(
+      box.width - thumbWidth,
+      1
+    );
 
   const stepWidth =
     usableWidth /
@@ -355,8 +463,11 @@ async function selectModelUsingSlider(
     async () => {
       try {
         return (
-          (await getCurrentModel(page))
-            .toLowerCase() ===
+          (
+            await getCurrentModel(
+              page
+            )
+          ).toLowerCase() ===
           targetModel.toLowerCase()
         );
       } catch {
@@ -366,7 +477,8 @@ async function selectModelUsingSlider(
     {
       timeoutMs: 5000,
       intervalMs: 200,
-      label: `UXPilot model "${targetModel}"`,
+      label:
+        `UXPilot model "${targetModel}"`,
     }
   );
 
@@ -376,15 +488,18 @@ async function selectModelUsingSlider(
 
   await page.keyboard
     .press("Escape")
-    .catch(() => undefined);
+    .catch(
+      () => undefined
+    );
 }
 
 /**
- * Resolves the actual image URL from a URL that may be:
+ * Resolves a real image URL from:
  *
- * 1. A direct image URL
- * 2. A Google imgres URL containing ?imgurl=...
- * 3. A page containing a visible image
+ * 1. Direct image URLs
+ * 2. Google imgres URLs containing imgurl
+ * 3. Visible images on the opened page
+ * 4. og:image
  */
 async function resolveImageUrl(
   imagePage: Page,
@@ -395,19 +510,28 @@ async function resolveImageUrl(
       new URL(originalUrl);
 
     const imgUrl =
-      parsed.searchParams.get("imgurl");
+      parsed.searchParams.get(
+        "imgurl"
+      );
 
     if (imgUrl) {
-      return decodeURIComponent(imgUrl);
+      return decodeURIComponent(
+        imgUrl
+      );
     }
   } catch {
-    // Ignore invalid URL parsing here.
+    // Continue to DOM based resolution.
   }
 
   const visibleImages =
-    imagePage.locator("img:visible");
+    imagePage.locator(
+      "img:visible"
+    );
 
-  if ((await visibleImages.count()) > 0) {
+  if (
+    (await visibleImages.count()) >
+    0
+  ) {
     const source =
       await visibleImages
         .first()
@@ -426,11 +550,16 @@ async function resolveImageUrl(
       'meta[property="og:image"]'
     );
 
-  if ((await metaImage.count()) > 0) {
+  if (
+    (await metaImage.count()) >
+    0
+  ) {
     const content =
       await metaImage
         .first()
-        .getAttribute("content");
+        .getAttribute(
+          "content"
+        );
 
     if (content) {
       return new URL(
@@ -444,13 +573,14 @@ async function resolveImageUrl(
 }
 
 /**
- * Opens the logo URL in a new browser page and copies
- * the actual image to the browser/system clipboard.
+ * Opens the logo URL in a new browser page,
+ * resolves the real image and copies the image
+ * into the browser/system clipboard.
  *
- * This is the reliable automation equivalent of:
+ * This represents the automation equivalent of:
  *
  * Open URL
- * -> right-click image
+ * -> right click image
  * -> Copy image
  */
 async function copyLogoImageToClipboard(
@@ -468,17 +598,26 @@ async function copyLogoImageToClipboard(
     await logoPage.goto(
       logoUrl,
       {
-        waitUntil: "domcontentloaded",
+        waitUntil:
+          "domcontentloaded",
         timeout: 30000,
       }
     );
 
-    await logoPage.waitForLoadState(
-      "networkidle"
-    ).catch(() => undefined);
+    await logoPage
+      .waitForLoadState(
+        "networkidle"
+      )
+      .catch(
+        () => undefined
+      );
 
-    await new Promise((resolve) =>
-      setTimeout(resolve, 1000)
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          1000
+        )
     );
 
     const resolvedImageUrl =
@@ -492,9 +631,13 @@ async function copyLogoImageToClipboard(
     );
 
     const imageResponse =
-      await fetch(resolvedImageUrl);
+      await fetch(
+        resolvedImageUrl
+      );
 
-    if (!imageResponse.ok) {
+    if (
+      !imageResponse.ok
+    ) {
       throw new Error(
         `Failed to download logo image: HTTP ${imageResponse.status}`
       );
@@ -504,9 +647,14 @@ async function copyLogoImageToClipboard(
       imageResponse.headers
         .get("content-type")
         ?.split(";")[0]
-        .trim() || "image/png";
+        .trim() ||
+      "image/png";
 
-    if (!contentType.startsWith("image/")) {
+    if (
+      !contentType.startsWith(
+        "image/"
+      )
+    ) {
       throw new Error(
         `Resolved logo URL is not an image. Content-Type: ${contentType}`
       );
@@ -517,31 +665,18 @@ async function copyLogoImageToClipboard(
         await imageResponse.arrayBuffer()
       );
 
-    if (imageBuffer.length === 0) {
+    if (
+      imageBuffer.length === 0
+    ) {
       throw new Error(
         "Logo image is empty."
       );
     }
 
     const base64 =
-      imageBuffer.toString("base64");
-
-    const logoOrigin =
-      new URL(
-        logoPage.url()
-      ).origin;
-
-    await page.context()
-      .grantPermissions(
-        [
-          "clipboard-read",
-          "clipboard-write",
-        ],
-        {
-          origin: logoOrigin,
-        }
-      )
-      .catch(() => undefined);
+      imageBuffer.toString(
+        "base64"
+      );
 
     await logoPage.evaluate(
       async ({
@@ -574,18 +709,24 @@ async function copyLogoImageToClipboard(
           );
 
         if (
-          !("ClipboardItem" in window)
+          !(
+            "ClipboardItem" in
+            window
+          )
         ) {
           throw new Error(
             "ClipboardItem is not supported by this browser."
           );
         }
 
-        await navigator.clipboard.write([
-          new ClipboardItem({
-            [contentType]: blob,
-          }),
-        ]);
+        await navigator.clipboard.write(
+          [
+            new ClipboardItem({
+              [contentType]:
+                blob,
+            }),
+          ]
+        );
       },
       {
         base64,
@@ -598,39 +739,53 @@ async function copyLogoImageToClipboard(
     );
   } finally {
     await logoPage.close()
-      .catch(() => undefined);
+      .catch(
+        () => undefined
+      );
   }
 }
 
 /**
- * Pastes the copied logo image into the main UXPilot composer
- * and adds the required explanation text.
+ * Focuses the real UXPilot composer textarea
+ * without clicking it.
+ *
+ * The live DOM showed the toolbar intercepting pointer events
+ * over the textarea, so .click() is intentionally avoided.
  */
-async function pasteLogoIntoPrompt(
+async function focusMainPromptInput(
   page: Page
 ): Promise<void> {
   const prompt =
-    selectors.mainPromptInput(page).first();
+    selectors
+      .mainPromptInput(page)
+      .first();
 
   await prompt.waitFor({
     state: "visible",
     timeout: 10000,
   });
 
-  await page.context()
-    .grantPermissions(
-      [
-        "clipboard-read",
-        "clipboard-write",
-      ],
-      {
-        origin:
-          new URL(page.url()).origin,
-      }
-    )
-    .catch(() => undefined);
+  await prompt.focus();
 
-  await prompt.click();
+  log.info(
+    "Main UXPilot composer focused."
+  );
+}
+
+/**
+ * Pastes the copied logo image into the main
+ * UXPilot composer and writes the required description.
+ *
+ * Important:
+ * No Enter is pressed here because the image + text
+ * must remain inside the composer for the next workflow stage.
+ */
+async function pasteLogoIntoPrompt(
+  page: Page
+): Promise<void> {
+  await focusMainPromptInput(
+    page
+  );
 
   log.info(
     "Pasting logo image into UXPilot composer..."
@@ -640,13 +795,24 @@ async function pasteLogoIntoPrompt(
     "Control+V"
   );
 
-  await new Promise((resolve) =>
-    setTimeout(resolve, 1000)
+  await new Promise(
+    (resolve) =>
+      setTimeout(
+        resolve,
+        1200
+      )
   );
 
-  await page.keyboard.press(
-    "Enter"
-  );
+  /**
+   * Refocus the same textarea after the image paste.
+   * This avoids relying on the toolbar click target.
+   */
+  const prompt =
+    selectors
+      .mainPromptInput(page)
+      .first();
+
+  await prompt.focus();
 
   await page.keyboard.type(
     "این عکس لوگوی برند هست",
@@ -661,7 +827,8 @@ async function pasteLogoIntoPrompt(
 }
 
 /**
- * Creates the new UXPilot project file and waits for the editor to open.
+ * Creates the new UXPilot project file
+ * and waits for the editor to open.
  */
 export async function createProject(
   page: Page,
@@ -671,42 +838,64 @@ export async function createProject(
     `Creating project "${row.projectName}"...`
   );
 
-  await dismissOptionalPopup(page);
+  await dismissOptionalPopup(
+    page
+  );
 
-  await selectors.createNewButton(page)
+  await selectors
+    .createNewButton(page)
     .first()
     .click();
 
-  await dismissOptionalPopup(page);
+  await dismissOptionalPopup(
+    page
+  );
 
-  await selectors.createFileOption(page)
+  await selectors
+    .createFileOption(page)
     .first()
     .click();
 
-  await selectors.projectNameInput(page)
+  await selectors
+    .projectNameInput(page)
     .first()
-    .fill(row.projectName);
+    .fill(
+      row.projectName
+    );
 
-  await selectors.fileContextInput(page)
+  await selectors
+    .fileContextInput(page)
     .first()
-    .fill(row.designSystem);
+    .fill(
+      row.designSystem
+    );
 
-  await selectors.createConfirmButton(page)
+  await selectors
+    .createConfirmButton(page)
     .first()
     .click();
 
   await waitUntil(
     async () =>
-      (await selectors.editorReadyIndicator(page).count()) > 0,
+      (
+        await selectors
+          .editorReadyIndicator(
+            page
+          )
+          .count()
+      ) > 0,
     {
       timeoutMs:
-        config.timeouts.createProjectMs,
+        config.timeouts
+          .createProjectMs,
       label:
         "UXPilot project editor to open",
     }
   );
 
-  await dismissOptionalPopup(page);
+  await dismissOptionalPopup(
+    page
+  );
 
   log.info(
     "Project created and editor is open."
@@ -714,14 +903,17 @@ export async function createProject(
 }
 
 /**
- * Selects the generation model matching the project's Required Project Level.
+ * Selects the generation model matching
+ * the project's Required Project Level.
  */
 export async function selectModel(
   page: Page,
   level: ProjectLevel
 ): Promise<void> {
   const configuredModel =
-    config.modelByLevel[level];
+    config.modelByLevel[
+      level
+    ];
 
   const targetModel =
     normalizeModelName(
@@ -732,7 +924,8 @@ export async function selectModel(
     `Selecting model "${targetModel}" for level "${level}"...`
   );
 
-  await selectors.modelDropdown(page)
+  await selectors
+    .modelDropdown(page)
     .first()
     .click();
 
@@ -741,11 +934,13 @@ export async function selectModel(
     targetModel
   );
 
-  await new Promise((resolve) =>
-    setTimeout(
-      resolve,
-      config.timeouts.modelSelectSettleMs
-    )
+  await new Promise(
+    (resolve) =>
+      setTimeout(
+        resolve,
+        config.timeouts
+          .modelSelectSettleMs
+      )
   );
 }
 
@@ -757,7 +952,10 @@ export async function addWebsiteLink(
   page: Page,
   url: string
 ): Promise<void> {
-  if (!url || url.trim().length === 0) {
+  if (
+    !url ||
+    url.trim().length === 0
+  ) {
     return;
   }
 
@@ -765,24 +963,36 @@ export async function addWebsiteLink(
     `Adding reference website: ${url}`
   );
 
-  await selectors.addWebsiteButton(page)
+  await selectors
+    .addWebsiteButton(page)
     .first()
     .click();
 
-  await selectors.websiteUrlInput(page)
+  await selectors
+    .websiteUrlInput(page)
     .first()
-    .fill(url.trim());
+    .fill(
+      url.trim()
+    );
 
-  await selectors.addConfirmButton(page)
+  await selectors
+    .addConfirmButton(page)
     .first()
     .click();
 
   await waitUntil(
     async () =>
-      (await selectors.websiteImportDoneIndicator(page).count()) > 0,
+      (
+        await selectors
+          .websiteImportDoneIndicator(
+            page
+          )
+          .count()
+      ) > 0,
     {
       timeoutMs:
-        config.timeouts.websiteImportMs,
+        config.timeouts
+          .websiteImportMs,
       label:
         "website import to finish",
     }
@@ -790,22 +1000,27 @@ export async function addWebsiteLink(
 }
 
 /**
- * Adds the brand logo to the main UXPilot composer.
+ * Adds the brand logo through the main UXPilot composer.
  *
  * Flow:
- * 1. Read logo URL from the project row.
+ * 1. Read logo URL from Sheet.
  * 2. Open the URL in a new page.
  * 3. Resolve the actual image.
- * 4. Copy the image into the browser clipboard.
- * 5. Return to the UXPilot page.
- * 6. Paste the image into the main composer.
- * 7. Add: "این عکس لوگوی برند هست"
+ * 4. Copy the image.
+ * 5. Return to UXPilot.
+ * 6. Focus the main composer.
+ * 7. Paste the image.
+ * 8. Type the logo description.
+ * 9. Do not submit the composer.
  */
 export async function uploadLogo(
   page: Page,
   logoUrl: string
 ): Promise<void> {
-  if (!logoUrl || logoUrl.trim().length === 0) {
+  if (
+    !logoUrl ||
+    logoUrl.trim().length === 0
+  ) {
     return;
   }
 
@@ -818,34 +1033,46 @@ export async function uploadLogo(
     logoUrl.trim()
   );
 
-  await pasteLogoIntoPrompt(page);
+  await pasteLogoIntoPrompt(
+    page
+  );
 }
 
 /**
- * Uploads every reference image, if the project has any.
+ * Uploads every reference image,
+ * if the project has any.
  *
- * This non-logo image workflow remains unchanged.
+ * This workflow remains unchanged.
  */
 export async function uploadSourceImages(
   page: Page,
   imageUrls: string[]
 ): Promise<void> {
-  for (const url of imageUrls) {
+  for (
+    const url of imageUrls
+  ) {
     log.info(
       `Uploading reference image: ${url}`
     );
 
     await uploadImageByUrl(
       page,
-      selectors.uploadImagesTrigger(page),
+      selectors.uploadImagesTrigger(
+        page
+      ),
       url
     );
   }
 }
 
 /**
- * Runs the full "insert context" sequence in the order the docs specify:
- * create -> select model -> add website -> add logo -> upload images.
+ * Runs the full project context sequence:
+ *
+ * create
+ * -> select model
+ * -> add website
+ * -> add logo
+ * -> upload reference images
  */
 export async function setupProjectContext(
   page: Page,
