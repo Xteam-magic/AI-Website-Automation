@@ -38,8 +38,9 @@ const selectors = {
     page.getByRole("button", { name: /^maybe later$/i }),
 
   modelDropdown: (page: Page) =>
-    page.getByRole("button", { name: /model/i })
-      .or(page.getByLabel(/model/i)),
+  page.getByRole("button", {
+    name: /^(glide|glide pro|fast|max)$/i,
+  }),
 
   modelOption: (page: Page, modelName: string) =>
     page.getByRole("option", {
