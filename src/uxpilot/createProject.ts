@@ -18,8 +18,11 @@ const log = logger.scope("UXPilot/CreateProject");
 const selectors = {
   createNewButton: (page: Page) => page.getByRole("button", { name: /create new/i }),
   createFileOption: (page: Page) => page.getByRole("menuitem", { name: /create (new )?file/i }).or(page.getByText(/create file/i)),
-  projectNameInput: (page: Page) => page.getByLabel(/project name|file name/i).or(page.getByPlaceholder(/project name/i)),
-  fileContextInput: (page: Page) => page.getByLabel(/file context|context/i).or(page.getByPlaceholder(/context/i)),
+  projectNameInput: (page: Page) =>
+  page.getByLabel(/^File Name$/i),
+
+fileContextInput: (page: Page) =>
+  page.getByLabel(/^File Context$/i),
   createConfirmButton: (page: Page) => page.getByRole("button", { name: /^create$/i }),
   editorReadyIndicator: (page: Page) => page.getByRole("button", { name: /generate|send/i }),
   maybeLaterButton: (page: Page) =>
