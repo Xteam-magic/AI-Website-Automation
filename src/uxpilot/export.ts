@@ -1,3 +1,6 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
 import type { Page } from "playwright";
 import { config } from "../config/config";
 import { logger } from "../logger/logger";
@@ -6,392 +9,297 @@ import { waitUntil } from "../helpers/wait";
 
 const log = logger.scope("UXPilot/Export");
 
-/**
- * SELECTOR NOTES
- * --------------
- * Export/Figma actions only become available after the generated
- * design itself is selected.
- */
 const selectors = {
-  /**
-   * Exact live button shown in the UXPilot toolbar:
-   * "Copy/Export"
-   */
-  copyExportMenu: (page: Page) =>
-    page.getByRole("button", {
-      name: /^copy\s*\/\s*export$/i,
-    }),
+  sourceCodePanel: (page: Page) =>
+    page.getByText(/^Source Code$/i).first(),
 
-  /**
-   * Menu option shown after opening Copy/Export.
-   */
-  copyAsHtmlOption: (page: Page) =>
-    page
-      .getByRole("menuitem", {
-        name: /^copy as html$/i,
-      })
-      .or(
-        page.getByText(
-          /^copy as html$/i
-        )
-      ),
-
-  /**
-   * Menu option shown after opening Copy/Export.
-   */
   copyToFigmaOption: (page: Page) =>
     page
-      .getByRole("menuitem", {
-        name: /^copy to figma$/i,
-      })
-      .or(
-        page.getByText(
-          /^copy to figma$/i
-        )
-      ),
+      .getByRole("menuitem", { name: /^copy to figma$/i })
+      .or(page.getByText(/^copy to figma$/i))
+      .first(),
 
-  /**
-   * UXPilot notification after Copy to Figma.
-   *
-   * We intentionally match "Design copied" broadly because
-   * the rest of the toast text can change.
-   */
   figmaCopiedToast: (page: Page) =>
-    page.getByText(
-      /design copied/i
-    ),
+    page.getByText(/design copied/i).first(),
 
-  /**
-   * Candidate generated-design containers.
-   *
-   * We do NOT assume one exact class because the live UXPilot
-   * canvas can change its generated class names.
-   */
-  designCandidates: (page: Page) =>
-    page.locator(
-      [
-        'iframe[title*="preview" i]',
-        '[data-testid*="canvas" i]',
-        '[data-testid*="design-surface" i]',
-        '[data-testid*="artboard" i]',
-        '[class*="design-surface" i]',
-        '[class*="canvas" i]',
-        '[class*="artboard" i]',
-        '[class*="preview" i]',
-      ].join(", ")
+  generatedDesignLabels: (page: Page) =>
+    page.getByText(
+      /^[^\n-]+-\s*(landing|home|pricing|dashboard|about|contact|blog)/i
     ),
 };
 
-/**
- * Reads text from the browser clipboard.
- */
-async function readClipboardText(
-  page: Page
-): Promise<string> {
-  return page.evaluate(
-    async () =>
-      navigator.clipboard.readText()
-  );
+async function readClipboardText(page: Page): Promise<string> {
+  return page.evaluate(async () => navigator.clipboard.readText());
 }
 
 /**
- * Finds the generated design area, clicks it,
- * and waits until the Copy/Export toolbar becomes visible.
- *
- * This is the critical step that was missing in the previous version.
+ * Clicks an icon-only button by inspecting its accessible metadata,
+ * title, data-testid and SVG data-lucide/class information.
  */
-async function selectGeneratedDesign(
-  page: Page
+async function clickIconButtonByHint(
+  page: Page,
+  hints: RegExp[],
+  label: string
 ): Promise<void> {
-  const candidates =
-    selectors
-      .designCandidates(page);
+  const result = await page.evaluate(
+    (serializedHints) => {
+      const regexes = serializedHints.map((source) => new RegExp(source, "i"));
+      const buttons = Array.from(document.querySelectorAll("button"));
 
-  const count =
-    await candidates.count();
+      for (const button of buttons) {
+        const rect = button.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) continue;
 
-  if (count === 0) {
+        const metadata = [
+          button.getAttribute("aria-label"),
+          button.getAttribute("title"),
+          button.getAttribute("data-testid"),
+          button.textContent,
+          ...Array.from(button.querySelectorAll("svg")).flatMap((svg) => [
+            svg.getAttribute("data-lucide"),
+            svg.getAttribute("aria-label"),
+            svg.getAttribute("class"),
+          ]),
+        ]
+          .filter(Boolean)
+          .join(" ");
+
+        if (regexes.some((regex) => regex.test(metadata))) {
+          (button as HTMLButtonElement).click();
+          return { clicked: true, metadata };
+        }
+      }
+
+      return { clicked: false, metadata: "" };
+    },
+    hints.map((hint) => hint.source)
+  );
+
+  if (!result.clicked) {
     throw new Error(
-      "No generated design surface was found on the UXPilot page."
+      `Could not find ${label} icon in the current UXPilot toolbar.`
     );
   }
 
-  /**
-   * Try visible candidates one by one.
-   * A successful candidate is the one that causes
-   * the Copy/Export toolbar to appear.
-   */
-  for (
-    let i = 0;
-    i < count;
-    i++
-  ) {
-    const candidate =
-      candidates.nth(i);
+  log.info(`${label} icon clicked (${result.metadata}).`);
+}
 
-    const visible =
-      await candidate
-        .isVisible()
-        .catch(() => false);
+async function selectGeneratedDesign(page: Page): Promise<void> {
+  const labels = selectors.generatedDesignLabels(page);
+  const labelCount = await labels.count();
 
-    if (!visible) {
-      continue;
-    }
-
-    const box =
-      await candidate
-        .boundingBox()
-        .catch(() => null);
-
-    if (!box) {
-      continue;
-    }
-
-    // Ignore tiny UI elements that happen to match the selectors.
-    if (
-      box.width < 200 ||
-      box.height < 150
-    ) {
-      continue;
-    }
+  for (let i = 0; i < labelCount; i++) {
+    const label = labels.nth(i);
+    if (!(await label.isVisible().catch(() => false))) continue;
 
     try {
-      log.info(
-        `Selecting generated design surface candidate ${i + 1}...`
-      );
-
-      /**
-       * Click the center of the actual design area.
-       *
-       * This mirrors the human action:
-       * click the generated screen itself.
-       */
-      await candidate.click({
-        position: {
-          x: box.width / 2,
-          y: box.height / 2,
-        },
-        timeout: 5000,
-      });
-
-      await waitUntil(
-        async () =>
-          (
-            await selectors
-              .copyExportMenu(page)
-              .count()
-          ) > 0 &&
-          await selectors
-            .copyExportMenu(page)
-            .first()
-            .isVisible()
-            .catch(() => false),
-        {
-          timeoutMs: 5000,
-          intervalMs: 250,
-          label:
-            "Copy/Export toolbar to appear",
-        }
-      );
-
-      log.info(
-        "Generated design selected and Copy/Export toolbar is visible."
-      );
-
+      await label.click({ timeout: 5000 });
+      await new Promise((resolve) => setTimeout(resolve, 500));
       return;
-    } catch (err) {
-      log.warn(
-        `Design candidate ${i + 1} did not open the export toolbar: ${
-          err instanceof Error
-            ? err.message
-            : String(err)
-        }`
-      );
+    } catch {
+      // Try next visible generated-screen label.
     }
   }
 
-  throw new Error(
-    "Generated design was found, but clicking it did not open the Copy/Export toolbar."
+  const candidates = page.locator(
+    [
+      '[data-testid*="canvas" i]',
+      '[data-testid*="design" i]',
+      '[data-testid*="frame" i]',
+      '[data-testid*="artboard" i]',
+      '[class*="design-surface" i]',
+      '[class*="artboard" i]',
+      '[class*="canvas" i]',
+    ].join(", ")
+  );
+
+  const count = await candidates.count();
+  let bestIndex = -1;
+  let bestArea = 0;
+
+  for (let i = 0; i < count; i++) {
+    const candidate = candidates.nth(i);
+    if (!(await candidate.isVisible().catch(() => false))) continue;
+
+    const box = await candidate.boundingBox().catch(() => null);
+    if (!box) continue;
+
+    const area = box.width * box.height;
+    if (box.width >= 200 && box.height >= 150 && area > bestArea) {
+      bestArea = area;
+      bestIndex = i;
+    }
+  }
+
+  if (bestIndex === -1) {
+    throw new Error("Generated design surface could not be identified.");
+  }
+
+  const design = candidates.nth(bestIndex);
+  const box = await design.boundingBox();
+  if (!box) throw new Error("Generated design surface has no bounding box.");
+
+  await page.mouse.click(
+    box.x + box.width / 2,
+    box.y + box.height / 2
   );
 }
 
-/**
- * Opens the Copy/Export toolbar.
- *
- * IMPORTANT:
- * The generated design must be selected first.
- */
-async function openCopyExportMenu(
-  page: Page
-): Promise<void> {
-  await selectGeneratedDesign(
-    page
-  );
+async function openSourceCodePanel(page: Page): Promise<void> {
+  await selectGeneratedDesign(page);
 
-  await selectors
-    .copyExportMenu(page)
-    .first()
-    .click();
+  await clickIconButtonByHint(
+    page,
+    [
+      /source.*code/i,
+      /view.*code/i,
+      /^code$/i,
+      /code-2/i,
+      /brackets/i,
+    ],
+    "Source Code"
+  );
 
   await waitUntil(
     async () =>
-      (
-        await selectors
-          .copyAsHtmlOption(page)
-          .count()
-      ) > 0,
+      (await selectors.sourceCodePanel(page).count()) > 0,
     {
-      timeoutMs: 5000,
+      timeoutMs: 10000,
       intervalMs: 250,
-      label:
-        "Copy/Export menu to open",
+      label: "Source Code panel to open",
     }
   );
 
-  log.info(
-    "Copy/Export menu opened."
+  log.info("Source Code panel opened.");
+}
+
+async function closeSourceCodePanel(page: Page): Promise<void> {
+  await page.keyboard.press("Escape").catch(() => undefined);
+}
+
+async function captureSourceCodeCopy(page: Page): Promise<string> {
+  await clickIconButtonByHint(
+    page,
+    [/^copy$/i, /copy/i],
+    "Source Code Copy"
   );
+
+  let html = "";
+  await waitUntil(
+    async () => {
+      try {
+        html = await readClipboardText(page);
+        return html.trim().length > 0;
+      } catch {
+        return false;
+      }
+    },
+    {
+      timeoutMs: config.timeouts.clipboardMs,
+      intervalMs: 500,
+      label: "Source Code HTML clipboard",
+    }
+  );
+
+  return html;
+}
+
+async function captureSourceCodeDownload(page: Page): Promise<string> {
+  const downloadPromise = page.waitForEvent("download", {
+    timeout: 10000,
+  });
+
+  await clickIconButtonByHint(
+    page,
+    [/download/i],
+    "Source Code Download"
+  );
+
+  const download = await downloadPromise;
+  const filePath = path.join(
+    os.tmpdir(),
+    `uxpilot-${Date.now()}-${download.suggestedFilename()}`
+  );
+
+  await download.saveAs(filePath);
+
+  const text = fs.readFileSync(filePath, "utf8");
+  return text;
 }
 
 /**
- * Copies the generated design as HTML and returns
- * the HTML content from the clipboard.
- *
- * Full workflow:
- *
- * Design click
- * -> Copy/Export
- * -> Copy as HTML
- * -> Wait for clipboard
+ * Current live UXPilot route:
+ * Design click -> <> Source Code icon -> Copy icon.
+ * Download is only a fallback if clipboard copy fails.
  */
-export async function copyAsHtml(
-  page: Page
-): Promise<string> {
-  log.info(
-    "Copying design as HTML..."
-  );
+export async function copyAsHtml(page: Page): Promise<string> {
+  log.info("Copying generated design HTML from Source Code...");
 
   return retry(
     async () => {
-      await openCopyExportMenu(
-        page
-      );
-
-      await selectors
-        .copyAsHtmlOption(page)
-        .first()
-        .click();
-
-      log.info(
-        "Clicked 'Copy as HTML'. Waiting for clipboard..."
-      );
+      await openSourceCodePanel(page);
 
       let html = "";
-
-      await waitUntil(
-        async () => {
-          try {
-            html =
-              await readClipboardText(
-                page
-              );
-
-            return (
-              html.trim().length > 0
-            );
-          } catch {
-            return false;
-          }
-        },
-        {
-          timeoutMs:
-            config.timeouts
-              .clipboardMs,
-          intervalMs: 500,
-          label:
-            "clipboard to contain HTML",
-        }
-      );
-
-      if (
-        html.trim().length === 0
-      ) {
-        throw new Error(
-          "Copy as HTML completed but clipboard is empty."
+      try {
+        html = await captureSourceCodeCopy(page);
+      } catch (copyError) {
+        log.warn(
+          `Source Code copy failed, trying download fallback: ${
+            copyError instanceof Error
+              ? copyError.message
+              : String(copyError)
+          }`
         );
+        html = await captureSourceCodeDownload(page);
       }
 
-      log.info(
-        `HTML copied successfully (${html.length} characters).`
-      );
+      if (!html || html.trim().length === 0) {
+        throw new Error("Source Code returned empty HTML.");
+      }
 
+      log.info(`HTML captured successfully (${html.length} characters).`);
+      await closeSourceCodePanel(page);
       return html;
     },
     {
-      retries:
-        config.retries.clipboard,
-      label:
-        "Copy as HTML (clipboard)",
+      retries: config.retries.clipboard,
+      label: "Source Code HTML export",
     }
   );
 }
 
 /**
- * Copies the generated design to Figma.
- *
- * Full workflow:
- *
- * Design click
- * -> Copy/Export
- * -> Copy to Figma
- * -> Wait for "Design copied..."
+ * Design click -> Copy/Export icon -> Copy to Figma -> wait for Design copied.
  */
-export async function copyToFigma(
-  page: Page
-): Promise<void> {
-  log.info(
-    "Copying design to Figma..."
+export async function copyToFigma(page: Page): Promise<void> {
+  log.info("Copying design to Figma...");
+
+  await selectGeneratedDesign(page);
+
+  await clickIconButtonByHint(
+    page,
+    [/copy.*export/i, /export/i, /copy\/export/i],
+    "Copy/Export"
   );
 
-  /**
-   * Select the actual generated design first.
-   */
-  await openCopyExportMenu(
-    page
-  );
-
-  await selectors
-    .copyToFigmaOption(page)
-    .first()
-    .click();
+  const option = selectors.copyToFigmaOption(page);
+  await option.waitFor({ state: "visible", timeout: 5000 });
+  await option.click();
 
   log.info(
-    "Clicked 'Copy to Figma'. Waiting for 'Design copied...' notification..."
+    "Clicked 'Copy to Figma'. Waiting for Design copied notification..."
   );
 
   await waitUntil(
     async () =>
-      (
-        await selectors
-          .figmaCopiedToast(page)
-          .count()
-      ) > 0 &&
-      await selectors
-        .figmaCopiedToast(page)
-        .first()
-        .isVisible()
-        .catch(() => false),
+      (await selectors.figmaCopiedToast(page).count()) > 0 &&
+      (await selectors.figmaCopiedToast(page).first().isVisible().catch(() => false)),
     {
-      timeoutMs:
-        config.timeouts
-          .figmaCopyToastMs,
+      timeoutMs: config.timeouts.figmaCopyToastMs,
       intervalMs: 500,
-      label:
-        '"Design copied" confirmation',
+      label: '"Design copied" notification',
     }
   );
 
-  log.info(
-    'Received "Design copied" confirmation.'
-  );
+  log.info('Received "Design copied" notification.');
 }
