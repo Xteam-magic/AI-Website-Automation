@@ -22,7 +22,7 @@ const log = logger.scope("UXPilot/Login");
 const selectors = {
   emailInput: (page: Page) => page.getByLabel(/email/i).or(page.getByPlaceholder(/email/i)),
   passwordInput: (page: Page) => page.getByLabel(/password/i).or(page.getByPlaceholder(/password/i)),
-  submitButton: (page: Page) => page.getByRole("button", { name: /log ?in|sign ?in/i }),
+  submitButton: (page: Page) => page.getByRole("button", { name: /^log ?in$/i }),
   // Present only once actually logged into the dashboard.
   loggedInIndicator: (page: Page) => page.getByRole("button", { name: /create new/i }),
   loginErrorMessage: (page: Page) => page.getByText(/invalid|incorrect|failed|wrong password/i),
