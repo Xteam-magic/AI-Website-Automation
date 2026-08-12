@@ -22,7 +22,7 @@ const selectors = {
   page.getByLabel(/^File Name$/i),
 
 fileContextInput: (page: Page) =>
-  page.getByLabel(/^File Context$/i),
+  page.getByPlaceholder(/Example: Use dark theme colors/i),
   createConfirmButton: (page: Page) => page.getByRole("button", { name: /^create$/i }),
   editorReadyIndicator: (page: Page) => page.getByRole("button", { name: /generate|send/i }),
   maybeLaterButton: (page: Page) =>
