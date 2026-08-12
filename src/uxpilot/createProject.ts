@@ -22,6 +22,8 @@ const selectors = {
   fileContextInput: (page: Page) => page.getByLabel(/file context|context/i).or(page.getByPlaceholder(/context/i)),
   createConfirmButton: (page: Page) => page.getByRole("button", { name: /^create$/i }),
   editorReadyIndicator: (page: Page) => page.getByRole("button", { name: /generate|send/i }),
+  maybeLaterButton: (page: Page) =>
+  page.getByRole("button", { name: /^maybe later$/i }),
 
   modelDropdown: (page: Page) => page.getByRole("button", { name: /model/i }).or(page.getByLabel(/model/i)),
   modelOption: (page: Page, modelName: string) => page.getByRole("option", { name: new RegExp(modelName, "i") }),
@@ -79,6 +81,18 @@ async function uploadImageByUrl(page: Page, triggerLocator: ReturnType<typeof se
   );
 }
 
+async function dismissOptionalPopup(page: Page): Promise<void> {
+  const maybeLaterButton = selectors.maybeLaterButton(page);
+
+  if ((await maybeLaterButton.count()) > 0) {
+    log.info("Optional UXPilot popup detected. Clicking 'Maybe Later'...");
+    await maybeLaterButton.first().click();
+    return;
+  }
+
+  log.info("No optional popup detected. Continuing...");
+}
+
 /** Creates the new UXPilot project file and waits for the editor to open. */
 export async function createProject(page: Page, row: ProjectRow): Promise<void> {
   log.info(`Creating project "${row.projectName}"...`);
@@ -93,6 +107,8 @@ export async function createProject(page: Page, row: ProjectRow): Promise<void> 
     timeoutMs: config.timeouts.createProjectMs,
     label: "UXPilot project editor to open",
   });
+
+  await dismissOptionalPopup(page);
 
   log.info("Project created and editor is open.");
 }
