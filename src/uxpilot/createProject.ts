@@ -10,115 +10,49 @@ import { ProjectLevel, ProjectRow } from "../types";
 
 const log = logger.scope("UXPilot/CreateProject");
 
-/**
- * SELECTOR NOTES
- * --------------
- * UXPilot DOM-specific selectors are isolated here so they can be
- * corrected without changing the workflow logic.
- */
 const selectors = {
   createNewButton: (page: Page) =>
-    page.getByRole("button", {
-      name: /^create new$/i,
-    }),
-
+    page.getByRole("button", { name: /^create new$/i }),
   createFileOption: (page: Page) =>
-    page.getByRole("menuitem", {
-      name: /^create new file$/i,
-    }),
-
+    page.getByRole("menuitem", { name: /^create new file$/i }),
   projectNameInput: (page: Page) =>
     page.getByLabel(/^File Name$/i),
-
   fileContextInput: (page: Page) =>
-    page.getByPlaceholder(
-      /Example: Use dark theme colors/i
-    ),
-
+    page.getByPlaceholder(/Example: Use dark theme colors/i),
   createConfirmButton: (page: Page) =>
-    page.getByRole("button", {
-      name: /^create$/i,
-    }),
-
+    page.getByRole("button", { name: /^create$/i }),
   editorReadyIndicator: (page: Page) =>
-    page.getByRole("button", {
-      name: /generate|send/i,
-    }),
-
+    page.getByRole("button", { name: /generate|send/i }),
   maybeLaterButton: (page: Page) =>
-    page.getByRole("button", {
-      name: /^maybe later$/i,
-    }),
-
-  /**
-   * Live UXPilot model selector.
-   *
-   * Current live values:
-   * Standard
-   * Max
-   * Glide
-   * Glide Pro
-   */
+    page.getByRole("button", { name: /^maybe later$/i }),
   modelDropdown: (page: Page) =>
     page.getByRole("button", {
       name: /^(Standard|Max|Glide|Glide Pro)$/i,
     }),
-
-  /**
-   * Live UXPilot model slider:
-   * Standard -> Max -> Glide -> Glide Pro
-   */
   modelSlider: (page: Page) =>
-    page
-      .locator(
-        "div.relative.cursor-pointer.touch-none"
-      )
-      .last(),
-
-  /**
-   * Main UXPilot composer.
-   *
-   * Live DOM:
-   * <textarea
-   *   placeholder="Describe your design, @ to reference images or documents"
-   * >
-   */
+    page.locator("div.relative.cursor-pointer.touch-none").last(),
   mainPromptInput: (page: Page) =>
     page.locator(
       'textarea[placeholder="Describe your design, @ to reference images or documents"]'
     ),
-
+  composerToolbar: (page: Page) =>
+    page.locator('[data-testid="chat-composer-toolbar"]').first(),
   addWebsiteButton: (page: Page) =>
-    page.getByRole("button", {
-      name: /add website( link)?/i,
-    }),
-
+    page.getByRole("button", { name: /add website( link)?/i }),
   websiteUrlInput: (page: Page) =>
     page
       .getByPlaceholder(/https?:\/\//i)
-      .or(
-        page.getByLabel(/website|url/i)
-      ),
-
+      .or(page.getByLabel(/website|url/i)),
   addConfirmButton: (page: Page) =>
-    page.getByRole("button", {
-      name: /^add$/i,
-    }),
-
+    page.getByRole("button", { name: /^add$/i }),
   websiteImportDoneIndicator: (page: Page) =>
-    page.getByText(
-      /imported|import complete/i
-    ),
-
+    page.getByText(/imported|import complete/i),
   uploadImagesTrigger: (page: Page) =>
     page.getByRole("button", {
       name: /upload image|add image|reference image/i,
     }),
 };
 
-/**
- * Actual model order observed in the live UXPilot UI.
- */
 const MODEL_ORDER = [
   "Standard",
   "Max",
@@ -126,372 +60,288 @@ const MODEL_ORDER = [
   "Glide Pro",
 ] as const;
 
-/**
- * The project documentation currently uses Fast for Low,
- * but the current live UXPilot UI exposes Standard instead.
- */
 const MODEL_ALIASES: Record<string, string> = {
   Fast: "Standard",
 };
 
-/**
- * Downloads a remote file to a local temporary path.
- *
- * Kept for reference-image handling.
- */
-async function downloadToTempFile(
-  url: string
-): Promise<string> {
-  const response = await fetch(url);
+type FlexibleProjectRow = ProjectRow & Record<string, unknown>;
 
-  if (!response.ok) {
-    throw new Error(
-      `Failed to download "${url}": HTTP ${response.status}`
-    );
+function readField(row: ProjectRow, keys: string[]): unknown {
+  const data = row as FlexibleProjectRow;
+  for (const key of keys) {
+    const value = data[key];
+    if (
+      value !== undefined &&
+      value !== null &&
+      String(value).trim() !== ""
+    ) {
+      return value;
+    }
   }
+  return "";
+}
 
-  const buffer =
-    Buffer.from(
-      await response.arrayBuffer()
-    );
+function formatField(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return String(value).trim();
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
 
-  const extension =
-    path.extname(
-      new URL(url).pathname
-    ) || ".png";
-
-  const filePath =
-    path.join(
-      os.tmpdir(),
-      `upload-${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2)}${extension}`
-    );
-
-  fs.writeFileSync(
-    filePath,
-    buffer
+/**
+ * Builds the project-wide context required in the final generation prompt.
+ * The Sheet specification contains Full Project Doc, Fonts, Language, Pages,
+ * AI Suggestions and User Suggestions as project fields.
+ */
+export function buildProjectPromptContext(row: ProjectRow): string {
+  const fullProjectDoc = formatField(
+    readField(row, ["fullProjectDoc", "Full Project Doc", "full_project_doc"])
+  );
+  const pages = formatField(readField(row, ["pages", "Pages"]));
+  const fonts = formatField(readField(row, ["fonts", "font", "Fonts", "Font"]));
+  const language = formatField(readField(row, ["language", "Language"]));
+  const aiSuggestions = formatField(
+    readField(row, ["aiSuggestions", "aiSuggestion", "AI Suggestions", "AI Suggestion", "ai_suggestions"])
+  );
+  const userSuggestions = formatField(
+    readField(row, ["userSuggestions", "userSuggestion", "User Suggestions", "User Suggestion", "user_suggestions"])
   );
 
+  return [
+    "PROJECT CONTEXT",
+    "",
+    "FULL PROJECT DOC:",
+    fullProjectDoc || "(empty)",
+    "",
+    "PAGES:",
+    pages || "(empty)",
+    "",
+    "FONTS:",
+    fonts || "(empty)",
+    "",
+    "LANGUAGE:",
+    language || "(empty)",
+    "",
+    "AI SUGGESTIONS:",
+    aiSuggestions || "(empty)",
+    "",
+    "USER SUGGESTIONS:",
+    userSuggestions || "(empty)",
+  ].join("\n");
+}
+
+async function downloadToTempFile(url: string): Promise<string> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download "${url}": HTTP ${response.status}`);
+  }
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const extension = path.extname(new URL(url).pathname) || ".png";
+  const filePath = path.join(
+    os.tmpdir(),
+    `upload-${Date.now()}-${Math.random().toString(36).slice(2)}${extension}`
+  );
+  fs.writeFileSync(filePath, buffer);
   return filePath;
 }
 
-/**
- * Uploads a non-logo reference image.
- *
- * Logo handling intentionally does NOT use this function.
- * Logo is pasted into the main composer as an image URL.
- */
-async function uploadImageByUrl(
-  page: Page,
-  triggerLocator: ReturnType<
-    typeof selectors.uploadImagesTrigger
-  >,
-  imageUrl: string
-): Promise<void> {
-  await retry(
-    async () => {
-      await triggerLocator
-        .first()
-        .click();
-
-      const urlField =
-        page.getByPlaceholder(
-          /https?:\/\//i
-        );
-
-      if (
-        (await urlField.count()) > 0
-      ) {
-        await urlField
-          .first()
-          .fill(imageUrl);
-
-        await page.keyboard.press(
-          "Enter"
-        );
-
-        return;
-      }
-
-      const [fileChooser] =
-        await Promise.all([
-          page.waitForEvent(
-            "filechooser",
-            {
-              timeout:
-                config.timeouts.imageUploadMs,
-            }
-          ),
-
-          triggerLocator
-            .first()
-            .click({
-              trial: true,
-            })
-            .catch(
-              () => undefined
-            ),
-        ]);
-
-      const localPath =
-        await downloadToTempFile(
-          imageUrl
-        );
-
-      await fileChooser.setFiles(
-        localPath
-      );
-    },
-    {
-      retries:
-        config.retries.upload,
-      label:
-        `Upload image: ${imageUrl}`,
-    }
-  );
-}
-
-/**
- * Dismisses the optional UXPilot promotional popup.
- *
- * The popup can appear shortly after navigation,
- * so we wait briefly for it instead of checking only once.
- */
-async function dismissOptionalPopup(
-  page: Page
-): Promise<void> {
-  const maybeLaterButton =
-    selectors
-      .maybeLaterButton(page)
-      .first();
-
+async function resolveImageUrl(page: Page, originalUrl: string): Promise<string> {
   try {
-    await maybeLaterButton.waitFor(
-      {
-        state: "visible",
-        timeout: 5000,
-      }
-    );
-
-    log.info(
-      "Optional UXPilot popup detected. Clicking 'Maybe Later'..."
-    );
-
-    await maybeLaterButton.click();
-
-    await maybeLaterButton
-      .waitFor({
-        state: "hidden",
-        timeout: 5000,
-      })
-      .catch(
-        () => undefined
-      );
-
-    await new Promise(
-      (resolve) =>
-        setTimeout(resolve, 500)
-    );
+    const parsed = new URL(originalUrl);
+    const imgUrl = parsed.searchParams.get("imgurl");
+    if (imgUrl) return decodeURIComponent(imgUrl);
   } catch {
-    log.info(
-      "No optional UXPilot popup detected."
-    );
+    // Continue with DOM resolution.
+  }
+
+  const visibleImages = page.locator("img:visible");
+  if ((await visibleImages.count()) > 0) {
+    const src = await visibleImages.first().getAttribute("src");
+    if (src) return new URL(src, page.url()).href;
+  }
+
+  const ogImage = page.locator('meta[property="og:image"]');
+  if ((await ogImage.count()) > 0) {
+    const content = await ogImage.first().getAttribute("content");
+    if (content) return new URL(content, page.url()).href;
+  }
+
+  return originalUrl;
+}
+
+async function downloadLogoImage(page: Page, logoUrl: string): Promise<string> {
+  log.info("Opening logo URL in a new page...");
+  const logoPage = await page.context().newPage();
+  try {
+    await logoPage.goto(logoUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+    await logoPage.waitForLoadState("networkidle").catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    const imageUrl = await resolveImageUrl(logoPage, logoUrl);
+    log.info(`Resolved logo image URL: ${imageUrl}`);
+    return await downloadToTempFile(imageUrl);
+  } finally {
+    await logoPage.close().catch(() => undefined);
   }
 }
 
-/**
- * Normalizes the configured model name
- * against the model names available in the live UXPilot UI.
- */
-function normalizeModelName(
-  modelName: string
-): string {
-  const normalized =
-    MODEL_ALIASES[modelName] ??
-    modelName;
+async function uploadFileThroughComposer(page: Page, localPath: string): Promise<void> {
+  const toolbar = selectors.composerToolbar(page);
+  await toolbar.waitFor({ state: "visible", timeout: 10000 });
 
-  const match =
-    MODEL_ORDER.find(
-      (model) =>
-        model.toLowerCase() ===
-        normalized.toLowerCase()
-    );
-
-  if (!match) {
-    throw new Error(
-      `Unsupported UXPilot model "${modelName}". ` +
-        `Available live models: ${MODEL_ORDER.join(", ")}`
-    );
+  const buttons = toolbar.getByRole("button");
+  if ((await buttons.count()) === 0) {
+    throw new Error("Could not find the attachment (+) button in the UXPilot composer.");
   }
 
-  return match;
-}
+  const addButton = buttons.first();
+  log.info("Opening UXPilot composer attachment menu...");
+  await addButton.click();
 
-/**
- * Reads the model currently displayed
- * by the UXPilot model button.
- */
-async function getCurrentModel(
-  page: Page
-): Promise<string> {
-  const button =
-    selectors
-      .modelDropdown(page)
-      .first();
-
-  const text =
-    (
-      await button.innerText()
-    ).trim();
-
-  const match =
-    MODEL_ORDER.find(
-      (model) =>
-        model.toLowerCase() ===
-        text.toLowerCase()
-    );
-
-  if (!match) {
-    throw new Error(
-      `Unable to determine current UXPilot model from button text "${text}".`
-    );
-  }
-
-  return match;
-}
-
-/**
- * Selects the target model using the live
- * four-step UXPilot model slider.
- *
- * Standard -> Max -> Glide -> Glide Pro
- */
-async function selectModelUsingSlider(
-  page: Page,
-  targetModel: string
-): Promise<void> {
-  const currentModel =
-    await getCurrentModel(page);
-
-  const currentIndex =
-    MODEL_ORDER.indexOf(
-      currentModel as
-        (typeof MODEL_ORDER)[number]
-    );
-
-  const targetIndex =
-    MODEL_ORDER.indexOf(
-      targetModel as
-        (typeof MODEL_ORDER)[number]
-    );
-
-  if (
-    currentIndex === -1
-  ) {
-    throw new Error(
-      `Current model "${currentModel}" is not recognized.`
-    );
-  }
-
-  if (
-    targetIndex === -1
-  ) {
-    throw new Error(
-      `Target model "${targetModel}" is not recognized.`
-    );
-  }
-
-  if (
-    currentIndex ===
-    targetIndex
-  ) {
-    log.info(
-      `Model "${targetModel}" is already selected.`
-    );
-
-    await page.keyboard
-      .press("Escape")
-      .catch(
-        () => undefined
-      );
-
+  const fileInputs = page.locator('input[type="file"]');
+  if ((await fileInputs.count()) > 0) {
+    await fileInputs.last().setInputFiles(localPath);
+    log.info("Logo file selected through UXPilot file input.");
     return;
   }
 
-  const slider =
-    selectors
-      .modelSlider(page)
-      .first();
+  const uploadOption = page
+    .getByRole("menuitem", {
+      name: /upload.*(file|image)|add.*(file|image)|attach/i,
+    })
+    .or(
+      page.getByText(
+        /upload.*(file|image)|add.*(file|image)|attach/i
+      )
+    )
+    .first();
 
-  await slider.waitFor(
-    {
-      state: "visible",
-      timeout: 5000,
-    }
+  await uploadOption.waitFor({ state: "visible", timeout: 5000 });
+  const [fileChooser] = await Promise.all([
+    page.waitForEvent("filechooser", {
+      timeout: config.timeouts.imageUploadMs,
+    }),
+    uploadOption.click(),
+  ]);
+  await fileChooser.setFiles(localPath);
+  log.info("Logo file uploaded through UXPilot attachment menu.");
+}
+
+async function waitForComposerAttachment(page: Page): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  await selectors.mainPromptInput(page).waitFor({
+    state: "visible",
+    timeout: 10000,
+  });
+}
+
+async function appendProjectContextToComposer(
+  page: Page,
+  row: ProjectRow
+): Promise<void> {
+  const context = buildProjectPromptContext(row);
+  await page.evaluate((value) => {
+    (window as unknown as { __xmagicProjectPromptContext?: string }).__xmagicProjectPromptContext = value;
+  }, context);
+
+  const prompt = selectors.mainPromptInput(page).first();
+  await prompt.focus();
+  await prompt.fill(context);
+  log.info("Project context added to the main UXPilot composer and stored for final generation.");
+}
+
+async function dismissOptionalPopup(page: Page): Promise<void> {
+  const maybeLater = selectors.maybeLaterButton(page).first();
+  try {
+    await maybeLater.waitFor({ state: "visible", timeout: 5000 });
+    log.info("Optional UXPilot popup detected. Clicking 'Maybe Later'...");
+    await maybeLater.click();
+    await maybeLater.waitFor({ state: "hidden", timeout: 5000 }).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  } catch {
+    log.info("No optional UXPilot popup detected.");
+  }
+}
+
+function normalizeModelName(modelName: string): string {
+  const normalized = MODEL_ALIASES[modelName] ?? modelName;
+  const match = MODEL_ORDER.find(
+    (model) => model.toLowerCase() === normalized.toLowerCase()
+  );
+  if (!match) {
+    throw new Error(
+      `Unsupported UXPilot model "${modelName}". Available models: ${MODEL_ORDER.join(", ")}`
+    );
+  }
+  return match;
+}
+
+async function getCurrentModel(page: Page): Promise<string> {
+  const button = selectors.modelDropdown(page).first();
+  const text = (await button.innerText()).trim();
+  const match = MODEL_ORDER.find(
+    (model) => model.toLowerCase() === text.toLowerCase()
+  );
+  if (!match) {
+    throw new Error(`Unable to determine current UXPilot model from "${text}".`);
+  }
+  return match;
+}
+
+async function selectModelUsingSlider(page: Page, targetModel: string): Promise<void> {
+  const currentModel = await getCurrentModel(page);
+  const currentIndex = MODEL_ORDER.indexOf(
+    currentModel as (typeof MODEL_ORDER)[number]
+  );
+  const targetIndex = MODEL_ORDER.indexOf(
+    targetModel as (typeof MODEL_ORDER)[number]
   );
 
-  const box =
-    await slider.boundingBox();
-
-  if (!box) {
+  if (currentIndex === -1 || targetIndex === -1) {
     throw new Error(
-      "Could not determine the UXPilot model slider position."
+      `Invalid model transition: "${currentModel}" -> "${targetModel}".`
     );
   }
 
-  /**
-   * Live DOM showed a 28px slider thumb.
-   *
-   * Model positions:
-   * 0%       Standard
-   * 33.33%   Max
-   * 66.67%   Glide
-   * 100%     Glide Pro
-   */
+  if (currentIndex === targetIndex) {
+    await page.keyboard.press("Escape").catch(() => undefined);
+    return;
+  }
+
+  const slider = selectors.modelSlider(page).first();
+  await slider.waitFor({ state: "visible", timeout: 5000 });
+  const box = await slider.boundingBox();
+  if (!box) {
+    throw new Error("Unable to determine model slider position.");
+  }
+
   const thumbWidth = 28;
+  const usableWidth = Math.max(box.width - thumbWidth, 1);
+  const stepWidth = usableWidth / (MODEL_ORDER.length - 1);
+  const targetX = box.x + thumbWidth / 2 + stepWidth * targetIndex;
+  const targetY = box.y + box.height / 2;
 
-  const usableWidth =
-    Math.max(
-      box.width -
-        thumbWidth,
-      1
-    );
-
-  const stepWidth =
-    usableWidth /
-    (MODEL_ORDER.length - 1);
-
-  const targetX =
-    box.x +
-    thumbWidth / 2 +
-    stepWidth *
-      targetIndex;
-
-  const targetY =
-    box.y +
-    box.height / 2;
-
-  log.info(
-    `Moving model from "${currentModel}" to "${targetModel}"...`
-  );
-
-  await page.mouse.click(
-    targetX,
-    targetY
-  );
+  log.info(`Moving model from "${currentModel}" to "${targetModel}"...`);
+  await page.mouse.click(targetX, targetY);
 
   await waitUntil(
     async () => {
       try {
         return (
-          (
-            await getCurrentModel(
-              page
-            )
-          ).toLowerCase() ===
-          targetModel.toLowerCase()
-        );
+          await getCurrentModel(page)
+        ).toLowerCase() === targetModel.toLowerCase();
       } catch {
         return false;
       }
@@ -499,558 +349,135 @@ async function selectModelUsingSlider(
     {
       timeoutMs: 5000,
       intervalMs: 200,
-      label:
-        `UXPilot model "${targetModel}"`,
+      label: `model "${targetModel}"`,
     }
   );
 
-  log.info(
-    `Model "${targetModel}" selected successfully.`
-  );
-
-  await page.keyboard
-    .press("Escape")
-    .catch(
-      () => undefined
-    );
+  await page.keyboard.press("Escape").catch(() => undefined);
+  log.info(`Model "${targetModel}" selected successfully.`);
 }
 
-/**
- * Resolves the actual image URL from:
- *
- * 1. Direct image URLs
- * 2. Google imgres URLs with ?imgurl=...
- * 3. Visible images on the opened page
- * 4. og:image
- */
-async function resolveImageUrl(
-  imagePage: Page,
-  originalUrl: string
-): Promise<string> {
-  try {
-    const parsed =
-      new URL(
-        originalUrl
-      );
-
-    const imgUrl =
-      parsed.searchParams.get(
-        "imgurl"
-      );
-
-    if (imgUrl) {
-      return decodeURIComponent(
-        imgUrl
-      );
-    }
-  } catch {
-    // Continue with DOM resolution.
-  }
-
-  const visibleImages =
-    imagePage.locator(
-      "img:visible"
-    );
-
-  if (
-    (await visibleImages.count()) >
-    0
-  ) {
-    const source =
-      await visibleImages
-        .first()
-        .getAttribute("src");
-
-    if (source) {
-      return new URL(
-        source,
-        imagePage.url()
-      ).href;
-    }
-  }
-
-  const metaImage =
-    imagePage.locator(
-      'meta[property="og:image"]'
-    );
-
-  if (
-    (await metaImage.count()) >
-    0
-  ) {
-    const content =
-      await metaImage
-        .first()
-        .getAttribute(
-          "content"
-        );
-
-    if (content) {
-      return new URL(
-        content,
-        imagePage.url()
-      ).href;
-    }
-  }
-
-  return originalUrl;
-}
-
-/**
- * Opens the logo URL in a separate page, resolves the actual
- * image URL, and copies the IMAGE ADDRESS as plain text.
- *
- * This is intentionally text clipboard only.
- *
- * Previous image-clipboard handling failed in GitHub Actions
- * because image/jpeg was not supported by ClipboardItem.write().
- *
- * Current behavior:
- *
- * Open logo URL
- * -> resolve real image URL
- * -> copy image address
- * -> return to UXPilot
- */
-async function copyLogoImageAddressToClipboard(
-  page: Page,
-  logoUrl: string
-): Promise<string> {
-  log.info(
-    "Opening logo URL in a new page to copy image address..."
-  );
-
-  const logoPage =
-    await page.context().newPage();
-
-  try {
-    await logoPage.goto(
-      logoUrl,
-      {
-        waitUntil:
-          "domcontentloaded",
-        timeout: 30000,
-      }
-    );
-
-    await logoPage
-      .waitForLoadState(
-        "networkidle"
-      )
-      .catch(
-        () => undefined
-      );
-
-    await new Promise(
-      (resolve) =>
-        setTimeout(
-          resolve,
-          1000
-        )
-    );
-
-    const resolvedImageUrl =
-      await resolveImageUrl(
-        logoPage,
-        logoUrl
-      );
-
-    log.info(
-      `Resolved logo image address: ${resolvedImageUrl}`
-    );
-
-    /**
-     * Grant clipboard permissions for the UXPilot page origin.
-     *
-     * The clipboard operation itself is text-only.
-     */
-    await page.context()
-      .grantPermissions(
-        [
-          "clipboard-read",
-          "clipboard-write",
-        ],
-        {
-          origin:
-            new URL(
-              page.url()
-            ).origin,
-        }
-      )
-      .catch(
-        () => undefined
-      );
-
-    /**
-     * Copy IMAGE ADDRESS as plain text.
-     *
-     * No ClipboardItem or image MIME type is used.
-     */
-    await page.evaluate(
-      async (url) => {
-        await navigator.clipboard
-          .writeText(url);
-      },
-      resolvedImageUrl
-    );
-
-    log.info(
-      "Logo image address copied to clipboard successfully."
-    );
-
-    return resolvedImageUrl;
-  } finally {
-    await logoPage.close()
-      .catch(
-        () => undefined
-      );
-  }
-}
-
-/**
- * Focuses the main UXPilot composer and pastes
- * the copied logo image URL.
- *
- * Important:
- * - Uses focus(), not click()
- * - Does not press Enter
- * - Keeps the logo URL inside the composer for
- *   the final page prompt / Generate step
- */
-async function pasteLogoAddressIntoPrompt(
-  page: Page
-): Promise<void> {
-  const prompt =
-    selectors
-      .mainPromptInput(page)
-      .first();
-
-  await prompt.waitFor(
-    {
-      state: "visible",
-      timeout: 10000,
-    }
-  );
-
-  /**
-   * The UXPilot composer toolbar can intercept
-   * pointer events, so click() is intentionally avoided.
-   */
-  await prompt.focus();
-
-  log.info(
-    "Pasting logo image address into UXPilot composer..."
-  );
-
-  await page.keyboard.press(
-    "Control+V"
-  );
-
-  await new Promise(
-    (resolve) =>
-      setTimeout(
-        resolve,
-        500
-      )
-  );
-
-  await prompt.focus();
-
-  await page.keyboard.type(
-    "\nاین لینک تصویر لوگوی برند هست",
-    {
-      delay: 10,
-    }
-  );
-
-  log.info(
-    "Logo image address and logo description added to the prompt."
-  );
-}
-
-/**
- * Creates the new UXPilot project file
- * and waits for the editor to open.
- */
 export async function createProject(
   page: Page,
   row: ProjectRow
 ): Promise<void> {
-  log.info(
-    `Creating project "${row.projectName}"...`
-  );
-
-  /**
-   * Popup can block Create New.
-   */
-  await dismissOptionalPopup(
-    page
-  );
-
-  await selectors
-    .createNewButton(page)
-    .first()
-    .click();
-
-  /**
-   * Safely dismiss again if it reappears.
-   */
-  await dismissOptionalPopup(
-    page
-  );
-
-  await selectors
-    .createFileOption(page)
-    .first()
-    .click();
-
-  await selectors
-    .projectNameInput(page)
-    .first()
-    .fill(
-      row.projectName
-    );
-
-  await selectors
-    .fileContextInput(page)
-    .first()
-    .fill(
-      row.designSystem
-    );
-
-  await selectors
-    .createConfirmButton(page)
-    .first()
-    .click();
+  log.info(`Creating project "${row.projectName}"...`);
+  await dismissOptionalPopup(page);
+  await selectors.createNewButton(page).first().click();
+  await dismissOptionalPopup(page);
+  await selectors.createFileOption(page).first().click();
+  await selectors.projectNameInput(page).first().fill(row.projectName);
+  await selectors.fileContextInput(page).first().fill(row.designSystem);
+  await selectors.createConfirmButton(page).first().click();
 
   await waitUntil(
     async () =>
-      (
-        await selectors
-          .editorReadyIndicator(
-            page
-          )
-          .count()
-      ) > 0,
+      (await selectors.editorReadyIndicator(page).count()) > 0,
     {
-      timeoutMs:
-        config.timeouts
-          .createProjectMs,
-      label:
-        "UXPilot project editor to open",
+      timeoutMs: config.timeouts.createProjectMs,
+      label: "UXPilot project editor to open",
     }
   );
 
-  /**
-   * Popup may also appear after entering the editor.
-   */
-  await dismissOptionalPopup(
-    page
-  );
-
-  log.info(
-    "Project created and editor is open."
-  );
+  await dismissOptionalPopup(page);
+  log.info("Project created and editor is open.");
 }
 
-/**
- * Selects the generation model matching
- * the project's Required Project Level.
- */
 export async function selectModel(
   page: Page,
   level: ProjectLevel
 ): Promise<void> {
-  const configuredModel =
-    config.modelByLevel[
-      level
-    ];
-
-  const targetModel =
-    normalizeModelName(
-      configuredModel
-    );
-
-  log.info(
-    `Selecting model "${targetModel}" for level "${level}"...`
-  );
-
-  await selectors
-    .modelDropdown(page)
-    .first()
-    .click();
-
-  await selectModelUsingSlider(
-    page,
-    targetModel
-  );
-
-  await new Promise(
-    (resolve) =>
-      setTimeout(
-        resolve,
-        config.timeouts
-          .modelSelectSettleMs
-      )
+  const configuredModel = config.modelByLevel[level];
+  const targetModel = normalizeModelName(configuredModel);
+  log.info(`Selecting model "${targetModel}" for level "${level}"...`);
+  await selectors.modelDropdown(page).first().click();
+  await selectModelUsingSlider(page, targetModel);
+  await new Promise((resolve) =>
+    setTimeout(resolve, config.timeouts.modelSelectSettleMs)
   );
 }
 
-/**
- * Adds a reference website, if the project has one,
- * and waits for the import to finish.
- */
 export async function addWebsiteLink(
   page: Page,
   url: string
 ): Promise<void> {
-  if (
-    !url ||
-    url.trim().length === 0
-  ) {
-    return;
-  }
+  if (!url || url.trim().length === 0) return;
 
-  log.info(
-    `Adding reference website: ${url}`
-  );
-
-  await selectors
-    .addWebsiteButton(page)
-    .first()
-    .click();
-
-  await selectors
-    .websiteUrlInput(page)
-    .first()
-    .fill(
-      url.trim()
-    );
-
-  await selectors
-    .addConfirmButton(page)
-    .first()
-    .click();
+  log.info(`Adding reference website: ${url}`);
+  await selectors.addWebsiteButton(page).first().click();
+  await selectors.websiteUrlInput(page).first().fill(url.trim());
+  await selectors.addConfirmButton(page).first().click();
 
   await waitUntil(
     async () =>
-      (
-        await selectors
-          .websiteImportDoneIndicator(
-            page
-          )
-          .count()
-      ) > 0,
+      (await selectors.websiteImportDoneIndicator(page).count()) > 0,
     {
-      timeoutMs:
-        config.timeouts
-          .websiteImportMs,
-      label:
-        "website import to finish",
+      timeoutMs: config.timeouts.websiteImportMs,
+      label: "website import to finish",
     }
   );
 }
 
-/**
- * Adds the brand logo through the main UXPilot composer.
- *
- * Flow:
- *
- * 1. Read Logo URL
- * 2. Open URL in a new page
- * 3. Resolve actual image address
- * 4. Copy IMAGE ADDRESS
- * 5. Return to UXPilot
- * 6. Focus main composer
- * 7. Paste image URL
- * 8. Add logo description
- * 9. Do not submit
- */
 export async function uploadLogo(
   page: Page,
   logoUrl: string
 ): Promise<void> {
-  if (
-    !logoUrl ||
-    logoUrl.trim().length === 0
-  ) {
-    return;
-  }
+  if (!logoUrl || logoUrl.trim().length === 0) return;
 
-  log.info(
-    "Adding brand logo through the main UXPilot composer..."
-  );
-
-  await copyLogoImageAddressToClipboard(
-    page,
-    logoUrl.trim()
-  );
-
-  await pasteLogoAddressIntoPrompt(
-    page
-  );
+  log.info("Downloading brand logo...");
+  const localPath = await downloadLogoImage(page, logoUrl.trim());
+  await uploadFileThroughComposer(page, localPath);
+  await waitForComposerAttachment(page);
+  log.info("Brand logo added to the UXPilot composer.");
 }
 
-/**
- * Uploads every reference image, if the project has any.
- *
- * Reference-image workflow remains unchanged.
- */
 export async function uploadSourceImages(
   page: Page,
   imageUrls: string[]
 ): Promise<void> {
-  for (
-    const url of imageUrls
-  ) {
-    log.info(
-      `Uploading reference image: ${url}`
-    );
+  for (const url of imageUrls) {
+    log.info(`Uploading reference image: ${url}`);
+    await retry(
+      async () => {
+        const trigger = selectors.uploadImagesTrigger(page).first();
+        await trigger.click();
+        const localPath = await downloadToTempFile(url);
+        const fileInputs = page.locator('input[type="file"]');
 
-    await uploadImageByUrl(
-      page,
-      selectors.uploadImagesTrigger(
-        page
-      ),
-      url
+        if ((await fileInputs.count()) > 0) {
+          await fileInputs.last().setInputFiles(localPath);
+          return;
+        }
+
+        const [fileChooser] = await Promise.all([
+          page.waitForEvent("filechooser", {
+            timeout: config.timeouts.imageUploadMs,
+          }),
+          trigger.click({ trial: true }).catch(() => undefined),
+        ]);
+        await fileChooser.setFiles(localPath);
+      },
+      {
+        retries: config.retries.upload,
+        label: `Upload image: ${url}`,
+      }
     );
   }
 }
 
 /**
- * Runs the full project context sequence:
- *
- * create
- * -> select model
- * -> add website
- * -> add logo
- * -> upload reference images
+ * Runs the context stage in the required order.
+ * The exported buildProjectPromptContext() is intended to be reused by
+ * generate.ts so the same full project context survives the final fill().
  */
 export async function setupProjectContext(
   page: Page,
   row: ProjectRow
 ): Promise<void> {
-  await createProject(
-    page,
-    row
-  );
-
-  await selectModel(
-    page,
-    row.requiredProjectLevel
-  );
-
-  await addWebsiteLink(
-    page,
-    row.sourceLinks
-  );
-
-  await uploadLogo(
-    page,
-    row.logoUrl
-  );
-
-  await uploadSourceImages(
-    page,
-    row.sourceImages
-  );
+  await createProject(page, row);
+  await selectModel(page, row.requiredProjectLevel);
+  await addWebsiteLink(page, row.sourceLinks);
+  await uploadLogo(page, row.logoUrl);
+  await appendProjectContextToComposer(page, row);
+  await uploadSourceImages(page, row.sourceImages);
 }
