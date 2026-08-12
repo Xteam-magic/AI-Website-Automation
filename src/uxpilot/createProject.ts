@@ -13,36 +13,47 @@ const log = logger.scope("UXPilot/CreateProject");
 /**
  * SELECTOR NOTES
  * --------------
- * UXPilot DOM-specific selectors are isolated in this object.
- * The selectors below are based on the live UXPilot UI observed during
- * the current automation run.
+ * UXPilot DOM-specific selectors are isolated here so they can be
+ * corrected without changing the workflow logic.
  */
 const selectors = {
   createNewButton: (page: Page) =>
-    page.getByRole("button", { name: /^create new$/i }),
+    page.getByRole("button", {
+      name: /^create new$/i,
+    }),
 
   createFileOption: (page: Page) =>
-    page.getByRole("menuitem", { name: /^create new file$/i }),
+    page.getByRole("menuitem", {
+      name: /^create new file$/i,
+    }),
 
   projectNameInput: (page: Page) =>
     page.getByLabel(/^File Name$/i),
 
   fileContextInput: (page: Page) =>
-    page.getByPlaceholder(/Example: Use dark theme colors/i),
+    page.getByPlaceholder(
+      /Example: Use dark theme colors/i
+    ),
 
   createConfirmButton: (page: Page) =>
-    page.getByRole("button", { name: /^create$/i }),
+    page.getByRole("button", {
+      name: /^create$/i,
+    }),
 
   editorReadyIndicator: (page: Page) =>
-    page.getByRole("button", { name: /generate|send/i }),
+    page.getByRole("button", {
+      name: /generate|send/i,
+    }),
 
   maybeLaterButton: (page: Page) =>
-    page.getByRole("button", { name: /^maybe later$/i }),
+    page.getByRole("button", {
+      name: /^maybe later$/i,
+    }),
 
   /**
-   * Live UXPilot model button.
+   * Live UXPilot model selector.
    *
-   * Current visible model values:
+   * Current live values:
    * Standard
    * Max
    * Glide
@@ -54,28 +65,23 @@ const selectors = {
     }),
 
   /**
-   * Live UXPilot model slider.
-   *
-   * The supplied DOM showed:
-   * <div class="relative cursor-pointer touch-none">
+   * Live UXPilot model slider:
+   * Standard -> Max -> Glide -> Glide Pro
    */
   modelSlider: (page: Page) =>
-    page.locator(
-      "div.relative.cursor-pointer.touch-none"
-    ).last(),
+    page
+      .locator(
+        "div.relative.cursor-pointer.touch-none"
+      )
+      .last(),
 
   /**
    * Main UXPilot composer.
    *
-   * Live DOM observed:
+   * Live DOM:
    * <textarea
-   *   rows="1"
    *   placeholder="Describe your design, @ to reference images or documents"
-   *   ...
-   * ></textarea>
-   *
-   * We intentionally target the native textarea directly instead of using
-   * a broad text/placeholder locator.
+   * >
    */
   mainPromptInput: (page: Page) =>
     page.locator(
@@ -90,13 +96,19 @@ const selectors = {
   websiteUrlInput: (page: Page) =>
     page
       .getByPlaceholder(/https?:\/\//i)
-      .or(page.getByLabel(/website|url/i)),
+      .or(
+        page.getByLabel(/website|url/i)
+      ),
 
   addConfirmButton: (page: Page) =>
-    page.getByRole("button", { name: /^add$/i }),
+    page.getByRole("button", {
+      name: /^add$/i,
+    }),
 
   websiteImportDoneIndicator: (page: Page) =>
-    page.getByText(/imported|import complete/i),
+    page.getByText(
+      /imported|import complete/i
+    ),
 
   uploadImagesTrigger: (page: Page) =>
     page.getByRole("button", {
@@ -115,15 +127,17 @@ const MODEL_ORDER = [
 ] as const;
 
 /**
- * Project documentation currently uses Fast for Low,
- * but the live UXPilot UI exposes Standard instead.
+ * The project documentation currently uses Fast for Low,
+ * but the current live UXPilot UI exposes Standard instead.
  */
 const MODEL_ALIASES: Record<string, string> = {
   Fast: "Standard",
 };
 
 /**
- * Downloads a remote file into a temporary local file.
+ * Downloads a remote file to a local temporary path.
+ *
+ * Kept for reference-image handling.
  */
 async function downloadToTempFile(
   url: string
@@ -136,19 +150,23 @@ async function downloadToTempFile(
     );
   }
 
-  const buffer = Buffer.from(
-    await response.arrayBuffer()
-  );
+  const buffer =
+    Buffer.from(
+      await response.arrayBuffer()
+    );
 
   const extension =
-    path.extname(new URL(url).pathname) || ".png";
+    path.extname(
+      new URL(url).pathname
+    ) || ".png";
 
-  const filePath = path.join(
-    os.tmpdir(),
-    `upload-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}${extension}`
-  );
+  const filePath =
+    path.join(
+      os.tmpdir(),
+      `upload-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2)}${extension}`
+    );
 
   fs.writeFileSync(
     filePath,
@@ -161,7 +179,8 @@ async function downloadToTempFile(
 /**
  * Uploads a non-logo reference image.
  *
- * This logic is intentionally kept separate from the brand-logo workflow.
+ * Logo handling intentionally does NOT use this function.
+ * Logo is pasted into the main composer as an image URL.
  */
 async function uploadImageByUrl(
   page: Page,
@@ -207,7 +226,9 @@ async function uploadImageByUrl(
 
           triggerLocator
             .first()
-            .click({ trial: true })
+            .click({
+              trial: true,
+            })
             .catch(
               () => undefined
             ),
@@ -234,9 +255,8 @@ async function uploadImageByUrl(
 /**
  * Dismisses the optional UXPilot promotional popup.
  *
- * The popup may render shortly after page navigation,
- * so this waits briefly for the button instead of checking
- * only once.
+ * The popup can appear shortly after navigation,
+ * so we wait briefly for it instead of checking only once.
  */
 async function dismissOptionalPopup(
   page: Page
@@ -281,8 +301,8 @@ async function dismissOptionalPopup(
 }
 
 /**
- * Normalizes the model coming from project configuration
- * against the live UXPilot model names.
+ * Normalizes the configured model name
+ * against the model names available in the live UXPilot UI.
  */
 function normalizeModelName(
   modelName: string
@@ -301,9 +321,7 @@ function normalizeModelName(
   if (!match) {
     throw new Error(
       `Unsupported UXPilot model "${modelName}". ` +
-        `Available live models: ${MODEL_ORDER.join(
-          ", "
-        )}`
+        `Available live models: ${MODEL_ORDER.join(", ")}`
     );
   }
 
@@ -311,8 +329,8 @@ function normalizeModelName(
 }
 
 /**
- * Reads the currently displayed model from
- * the UXPilot model button.
+ * Reads the model currently displayed
+ * by the UXPilot model button.
  */
 async function getCurrentModel(
   page: Page
@@ -345,7 +363,7 @@ async function getCurrentModel(
 
 /**
  * Selects the target model using the live
- * UXPilot 4-step model slider.
+ * four-step UXPilot model slider.
  *
  * Standard -> Max -> Glide -> Glide Pro
  */
@@ -406,10 +424,12 @@ async function selectModelUsingSlider(
       .modelSlider(page)
       .first();
 
-  await slider.waitFor({
-    state: "visible",
-    timeout: 5000,
-  });
+  await slider.waitFor(
+    {
+      state: "visible",
+      timeout: 5000,
+    }
+  );
 
   const box =
     await slider.boundingBox();
@@ -422,18 +442,19 @@ async function selectModelUsingSlider(
 
   /**
    * Live DOM showed a 28px slider thumb.
-   * Four equally spaced model positions:
    *
-   * 0%     Standard
-   * 33.33% Max
-   * 66.67% Glide
-   * 100%   Glide Pro
+   * Model positions:
+   * 0%       Standard
+   * 33.33%   Max
+   * 66.67%   Glide
+   * 100%     Glide Pro
    */
   const thumbWidth = 28;
 
   const usableWidth =
     Math.max(
-      box.width - thumbWidth,
+      box.width -
+        thumbWidth,
       1
     );
 
@@ -444,7 +465,8 @@ async function selectModelUsingSlider(
   const targetX =
     box.x +
     thumbWidth / 2 +
-    stepWidth * targetIndex;
+    stepWidth *
+      targetIndex;
 
   const targetY =
     box.y +
@@ -494,10 +516,10 @@ async function selectModelUsingSlider(
 }
 
 /**
- * Resolves a real image URL from:
+ * Resolves the actual image URL from:
  *
  * 1. Direct image URLs
- * 2. Google imgres URLs containing imgurl
+ * 2. Google imgres URLs with ?imgurl=...
  * 3. Visible images on the opened page
  * 4. og:image
  */
@@ -507,7 +529,9 @@ async function resolveImageUrl(
 ): Promise<string> {
   try {
     const parsed =
-      new URL(originalUrl);
+      new URL(
+        originalUrl
+      );
 
     const imgUrl =
       parsed.searchParams.get(
@@ -520,7 +544,7 @@ async function resolveImageUrl(
       );
     }
   } catch {
-    // Continue to DOM based resolution.
+    // Continue with DOM resolution.
   }
 
   const visibleImages =
@@ -573,22 +597,27 @@ async function resolveImageUrl(
 }
 
 /**
- * Opens the logo URL in a new browser page,
- * resolves the real image and copies the image
- * into the browser/system clipboard.
+ * Opens the logo URL in a separate page, resolves the actual
+ * image URL, and copies the IMAGE ADDRESS as plain text.
  *
- * This represents the automation equivalent of:
+ * This is intentionally text clipboard only.
  *
- * Open URL
- * -> right click image
- * -> Copy image
+ * Previous image-clipboard handling failed in GitHub Actions
+ * because image/jpeg was not supported by ClipboardItem.write().
+ *
+ * Current behavior:
+ *
+ * Open logo URL
+ * -> resolve real image URL
+ * -> copy image address
+ * -> return to UXPilot
  */
-async function copyLogoImageToClipboard(
+async function copyLogoImageAddressToClipboard(
   page: Page,
   logoUrl: string
-): Promise<void> {
+): Promise<string> {
   log.info(
-    "Opening logo URL in a new page..."
+    "Opening logo URL in a new page to copy image address..."
   );
 
   const logoPage =
@@ -627,116 +656,49 @@ async function copyLogoImageToClipboard(
       );
 
     log.info(
-      `Resolved logo image URL: ${resolvedImageUrl}`
+      `Resolved logo image address: ${resolvedImageUrl}`
     );
 
-    const imageResponse =
-      await fetch(
-        resolvedImageUrl
-      );
-
-    if (
-      !imageResponse.ok
-    ) {
-      throw new Error(
-        `Failed to download logo image: HTTP ${imageResponse.status}`
-      );
-    }
-
-    const contentType =
-      imageResponse.headers
-        .get("content-type")
-        ?.split(";")[0]
-        .trim() ||
-      "image/png";
-
-    if (
-      !contentType.startsWith(
-        "image/"
+    /**
+     * Grant clipboard permissions for the UXPilot page origin.
+     *
+     * The clipboard operation itself is text-only.
+     */
+    await page.context()
+      .grantPermissions(
+        [
+          "clipboard-read",
+          "clipboard-write",
+        ],
+        {
+          origin:
+            new URL(
+              page.url()
+            ).origin,
+        }
       )
-    ) {
-      throw new Error(
-        `Resolved logo URL is not an image. Content-Type: ${contentType}`
-      );
-    }
-
-    const imageBuffer =
-      Buffer.from(
-        await imageResponse.arrayBuffer()
+      .catch(
+        () => undefined
       );
 
-    if (
-      imageBuffer.length === 0
-    ) {
-      throw new Error(
-        "Logo image is empty."
-      );
-    }
-
-    const base64 =
-      imageBuffer.toString(
-        "base64"
-      );
-
-    await logoPage.evaluate(
-      async ({
-        base64,
-        contentType,
-      }) => {
-        const binary =
-          atob(base64);
-
-        const bytes =
-          new Uint8Array(
-            binary.length
-          );
-
-        for (
-          let i = 0;
-          i < binary.length;
-          i++
-        ) {
-          bytes[i] =
-            binary.charCodeAt(i);
-        }
-
-        const blob =
-          new Blob(
-            [bytes],
-            {
-              type: contentType,
-            }
-          );
-
-        if (
-          !(
-            "ClipboardItem" in
-            window
-          )
-        ) {
-          throw new Error(
-            "ClipboardItem is not supported by this browser."
-          );
-        }
-
-        await navigator.clipboard.write(
-          [
-            new ClipboardItem({
-              [contentType]:
-                blob,
-            }),
-          ]
-        );
+    /**
+     * Copy IMAGE ADDRESS as plain text.
+     *
+     * No ClipboardItem or image MIME type is used.
+     */
+    await page.evaluate(
+      async (url) => {
+        await navigator.clipboard
+          .writeText(url);
       },
-      {
-        base64,
-        contentType,
-      }
+      resolvedImageUrl
     );
 
     log.info(
-      "Logo image copied to clipboard successfully."
+      "Logo image address copied to clipboard successfully."
     );
+
+    return resolvedImageUrl;
   } finally {
     await logoPage.close()
       .catch(
@@ -746,13 +708,16 @@ async function copyLogoImageToClipboard(
 }
 
 /**
- * Focuses the real UXPilot composer textarea
- * without clicking it.
+ * Focuses the main UXPilot composer and pastes
+ * the copied logo image URL.
  *
- * The live DOM showed the toolbar intercepting pointer events
- * over the textarea, so .click() is intentionally avoided.
+ * Important:
+ * - Uses focus(), not click()
+ * - Does not press Enter
+ * - Keeps the logo URL inside the composer for
+ *   the final page prompt / Generate step
  */
-async function focusMainPromptInput(
+async function pasteLogoAddressIntoPrompt(
   page: Page
 ): Promise<void> {
   const prompt =
@@ -760,35 +725,21 @@ async function focusMainPromptInput(
       .mainPromptInput(page)
       .first();
 
-  await prompt.waitFor({
-    state: "visible",
-    timeout: 10000,
-  });
+  await prompt.waitFor(
+    {
+      state: "visible",
+      timeout: 10000,
+    }
+  );
 
+  /**
+   * The UXPilot composer toolbar can intercept
+   * pointer events, so click() is intentionally avoided.
+   */
   await prompt.focus();
 
   log.info(
-    "Main UXPilot composer focused."
-  );
-}
-
-/**
- * Pastes the copied logo image into the main
- * UXPilot composer and writes the required description.
- *
- * Important:
- * No Enter is pressed here because the image + text
- * must remain inside the composer for the next workflow stage.
- */
-async function pasteLogoIntoPrompt(
-  page: Page
-): Promise<void> {
-  await focusMainPromptInput(
-    page
-  );
-
-  log.info(
-    "Pasting logo image into UXPilot composer..."
+    "Pasting logo image address into UXPilot composer..."
   );
 
   await page.keyboard.press(
@@ -799,30 +750,21 @@ async function pasteLogoIntoPrompt(
     (resolve) =>
       setTimeout(
         resolve,
-        1200
+        500
       )
   );
-
-  /**
-   * Refocus the same textarea after the image paste.
-   * This avoids relying on the toolbar click target.
-   */
-  const prompt =
-    selectors
-      .mainPromptInput(page)
-      .first();
 
   await prompt.focus();
 
   await page.keyboard.type(
-    "این عکس لوگوی برند هست",
+    "\nاین لینک تصویر لوگوی برند هست",
     {
       delay: 10,
     }
   );
 
   log.info(
-    "Logo pasted and logo description added to the prompt."
+    "Logo image address and logo description added to the prompt."
   );
 }
 
@@ -838,6 +780,9 @@ export async function createProject(
     `Creating project "${row.projectName}"...`
   );
 
+  /**
+   * Popup can block Create New.
+   */
   await dismissOptionalPopup(
     page
   );
@@ -847,6 +792,9 @@ export async function createProject(
     .first()
     .click();
 
+  /**
+   * Safely dismiss again if it reappears.
+   */
   await dismissOptionalPopup(
     page
   );
@@ -893,6 +841,9 @@ export async function createProject(
     }
   );
 
+  /**
+   * Popup may also appear after entering the editor.
+   */
   await dismissOptionalPopup(
     page
   );
@@ -1003,15 +954,16 @@ export async function addWebsiteLink(
  * Adds the brand logo through the main UXPilot composer.
  *
  * Flow:
- * 1. Read logo URL from Sheet.
- * 2. Open the URL in a new page.
- * 3. Resolve the actual image.
- * 4. Copy the image.
- * 5. Return to UXPilot.
- * 6. Focus the main composer.
- * 7. Paste the image.
- * 8. Type the logo description.
- * 9. Do not submit the composer.
+ *
+ * 1. Read Logo URL
+ * 2. Open URL in a new page
+ * 3. Resolve actual image address
+ * 4. Copy IMAGE ADDRESS
+ * 5. Return to UXPilot
+ * 6. Focus main composer
+ * 7. Paste image URL
+ * 8. Add logo description
+ * 9. Do not submit
  */
 export async function uploadLogo(
   page: Page,
@@ -1028,21 +980,20 @@ export async function uploadLogo(
     "Adding brand logo through the main UXPilot composer..."
   );
 
-  await copyLogoImageToClipboard(
+  await copyLogoImageAddressToClipboard(
     page,
     logoUrl.trim()
   );
 
-  await pasteLogoIntoPrompt(
+  await pasteLogoAddressIntoPrompt(
     page
   );
 }
 
 /**
- * Uploads every reference image,
- * if the project has any.
+ * Uploads every reference image, if the project has any.
  *
- * This workflow remains unchanged.
+ * Reference-image workflow remains unchanged.
  */
 export async function uploadSourceImages(
   page: Page,
