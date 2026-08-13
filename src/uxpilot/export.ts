@@ -162,9 +162,8 @@ async function zoomOutOnce(page: Page): Promise<void> {
 
 async function getVisibleZoomPercent(page: Page): Promise<number | null> {
   return page.evaluate(() => {
-    const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
-    const candidates = Array.from(document.querySelectorAll("*"));
+    const candidates = Array.from(document.querySelectorAll("body *"));
 
     const matches = candidates
       .map((element) => {
@@ -173,33 +172,16 @@ async function getVisibleZoomPercent(page: Page): Promise<number | null> {
 
         const rect = element.getBoundingClientRect();
         if (rect.width < 1 || rect.height < 1) return null;
-        if (rect.bottom < viewportHeight - 150) return null;
-        if (rect.left > Math.min(320, viewportWidth * 0.28)) return null;
 
         const style = window.getComputedStyle(element);
-        if (style.visibility === "hidden" || style.display === "none") {
-          return null;
-        }
+        if (style.visibility === "hidden" || style.display === "none") return null;
 
-        return {
-          percent: Number.parseInt(text.slice(0, -1), 10),
-          area: rect.width * rect.height,
-          left: rect.left,
-          top: rect.top,
-        };
+        const distanceFromBottom = Math.max(0, viewportHeight - rect.bottom);
+        return { percent: Number.parseInt(text.slice(0, -1), 10), area: rect.width * rect.height, distanceFromBottom };
       })
-      .filter(
-        (
-          value
-        ): value is {
-          percent: number;
-          area: number;
-          left: number;
-          top: number;
-        } => value !== null
-      )
+      .filter((value): value is { percent: number; area: number; distanceFromBottom: number } => value !== null)
       .sort((a, b) => {
-        if (Math.abs(a.top - b.top) > 4) return b.top - a.top;
+        if (Math.abs(a.distanceFromBottom - b.distanceFromBottom) > 12) return a.distanceFromBottom - b.distanceFromBottom;
         return a.area - b.area;
       });
 
