@@ -157,20 +157,205 @@ async function zoomOutOnce(page: Page): Promise<void> {
     "Zoom Out"
   );
 
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  await new Promise((resolve) => setTimeout(resolve, 180));
+}
+
+async function getVisibleZoomPercent(page: Page): Promise<number | null> {
+  return page.evaluate(() => {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const candidates = Array.from(document.querySelectorAll("*"));
+
+    const matches = candidates
+      .map((element) => {
+        const text = (element.textContent || "").trim();
+        if (!/^\d{1,3}%$/.test(text)) return null;
+
+        const rect = element.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) return null;
+        if (rect.bottom < viewportHeight - 150) return null;
+        if (rect.left > Math.min(320, viewportWidth * 0.28)) return null;
+
+        const style = window.getComputedStyle(element);
+        if (style.visibility === "hidden" || style.display === "none") {
+          return null;
+        }
+
+        return {
+          percent: Number.parseInt(text.slice(0, -1), 10),
+          area: rect.width * rect.height,
+          left: rect.left,
+          top: rect.top,
+        };
+      })
+      .filter(
+        (
+          value
+        ): value is {
+          percent: number;
+          area: number;
+          left: number;
+          top: number;
+        } => value !== null
+      )
+      .sort((a, b) => {
+        if (Math.abs(a.top - b.top) > 4) return b.top - a.top;
+        return a.area - b.area;
+      });
+
+    return matches.length > 0 ? matches[0].percent : null;
+  });
+}
+
+async function zoomOutToMinimum(page: Page, minimumPercent = 5): Promise<void> {
+  // UXPilot's canvas zoom control is the small minus button in the bottom bar.
+  // Keep clicking until the visible canvas zoom reaches the requested floor.
+  // The hard cap prevents an unexpected UI change from causing an infinite loop.
+  const maxClicks = 30;
+
+  for (let i = 0; i < maxClicks; i++) {
+    const currentPercent = await getVisibleZoomPercent(page);
+
+    if (currentPercent !== null && currentPercent <= minimumPercent) {
+      log.info(`Canvas zoom reached ${currentPercent}% (target ${minimumPercent}%).`);
+      return;
+    }
+
+    try {
+      await zoomOutOnce(page);
+    } catch (error) {
+      const afterFailure = await getVisibleZoomPercent(page);
+      if (afterFailure !== null && afterFailure <= minimumPercent) {
+        log.info(`Canvas zoom is already at ${afterFailure}%; stopping zoom-out.`);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  const finalPercent = await getVisibleZoomPercent(page);
+  if (finalPercent !== null && finalPercent <= minimumPercent) {
+    log.info(`Canvas zoom reached ${finalPercent}% (target ${minimumPercent}%).`);
+    return;
+  }
+
+  throw new Error(
+    `Could not reduce UXPilot canvas zoom to ${minimumPercent}% within ${maxClicks} clicks.`
+  );
+}
+
+async function findBestDesignSurface(page: Page): Promise<ReturnType<Page["locator"]>> {
+  const candidates = page.locator(
+    [
+      '[data-testid*="canvas" i]',
+      '[data-testid*="design" i]',
+      '[data-testid*="frame" i]',
+      '[data-testid*="artboard" i]',
+      '[class*="design-surface" i]',
+      '[class*="artboard" i]',
+      '[class*="canvas" i]',
+    ].join(", ")
+  );
+
+  const count = await candidates.count();
+  let bestIndex = -1;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (let i = 0; i < count; i++) {
+    const candidate = candidates.nth(i);
+    if (!(await candidate.isVisible().catch(() => false))) continue;
+
+    const box = await candidate.boundingBox().catch(() => null);
+    if (!box) continue;
+
+    const area = box.width * box.height;
+    if (box.width < 40 || box.height < 40) continue;
+
+    // Prefer plausible generated-design frames over generic canvas containers.
+    const className = await candidate.getAttribute("class").catch(() => null);
+    const testId = await candidate.getAttribute("data-testid").catch(() => null);
+    const metadata = `${className || ""} ${testId || ""}`.toLowerCase();
+
+    let score = Math.min(area, 500_000);
+    if (/artboard|design-surface|frame/.test(metadata)) score += 2_000_000;
+    if (/canvas/.test(metadata)) score += 50_000;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = i;
+    }
+  }
+
+  if (bestIndex === -1) {
+    throw new Error("Generated design surface could not be identified.");
+  }
+
+  return candidates.nth(bestIndex);
+}
+
+async function clickDesignSurface(page: Page): Promise<void> {
+  try {
+    const design = await findBestDesignSurface(page);
+    const box = await design.boundingBox();
+
+    if (box && box.width >= 40 && box.height >= 40) {
+      await page.mouse.move(
+        box.x + box.width / 2,
+        box.y + box.height / 2
+      );
+      await page.mouse.click(
+        box.x + box.width / 2,
+        box.y + box.height / 2
+      );
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return;
+    }
+  } catch {
+    // Fall back to the generated-screen label below.
+  }
+
+  await selectGeneratedDesign(page);
+  await new Promise((resolve) => setTimeout(resolve, 400));
 }
 
 async function prepareDesignToolbarForSourceCode(page: Page): Promise<void> {
-  // The UXPilot design toolbar can sit partially behind the main toolbar.
-  // Do not scroll the canvas: use the visible zoom control instead.
-  // Sequence required by the live UI: design click -> zoom out twice -> design click.
+  // Exact live-UI flow requested:
+  // 1) click the generated page
+  // 2) zoom the canvas all the way out to 5%
+  // 3) move onto the design and scroll down a little so the lower part of the page is visible
+  // 4) click the design again so UXPilot re-attaches/shows its floating toolbar
+  // 5) only then search for the Source Code (<>) button
   await selectGeneratedDesign(page);
 
-  await zoomOutOnce(page);
-  await zoomOutOnce(page);
+  await zoomOutToMinimum(page, 5);
 
-  await selectGeneratedDesign(page);
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  let designBox: { x: number; y: number; width: number; height: number } | null = null;
+  try {
+    const design = await findBestDesignSurface(page);
+    designBox = await design.boundingBox().catch(() => null);
+  } catch {
+    // The label fallback below can still position the mouse over the design area.
+  }
+
+  if (designBox) {
+    const x = designBox.x + designBox.width / 2;
+    const y = designBox.y + designBox.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.wheel(0, 650);
+  } else {
+    // Keep the wheel event inside the central design workspace rather than on the app chrome.
+    const viewport = page.viewportSize();
+    const x = viewport ? Math.round(viewport.width * 0.55) : 720;
+    const y = viewport ? Math.round(viewport.height * 0.55) : 450;
+    await page.mouse.move(x, y);
+    await page.mouse.wheel(0, 650);
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await clickDesignSurface(page);
+
+  // Give the floating toolbar a moment to reposition after the second selection.
+  await new Promise((resolve) => setTimeout(resolve, 500));
 }
 
 async function openSourceCodePanel(page: Page): Promise<void> {
@@ -181,9 +366,10 @@ async function openSourceCodePanel(page: Page): Promise<void> {
     [
       /source.*code/i,
       /view.*code/i,
-      /^code$/i,
+      /lucide[-\s]?code/i,
       /code-2/i,
       /brackets/i,
+      /^code$/i,
     ],
     "Source Code"
   );
