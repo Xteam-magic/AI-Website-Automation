@@ -145,8 +145,77 @@ async function selectGeneratedDesign(page: Page): Promise<void> {
   );
 }
 
+/**
+ * UXPilot keeps the generated-design toolbar attached to the selected page.
+ * In the current layout, the toolbar can sit underneath the fixed bottom
+ * canvas toolbar when the design is first selected. Scroll only the canvas
+ * under the selected design by half a viewport, then select the design again
+ * so the attached toolbar is brought into the visible area.
+ */
+async function revealGeneratedDesignToolbar(page: Page): Promise<void> {
+  const design = page.locator(
+    [
+      '[data-testid*="canvas" i]',
+      '[data-testid*="design" i]',
+      '[data-testid*="frame" i]',
+      '[data-testid*="artboard" i]',
+      '[class*="design-surface" i]',
+      '[class*="artboard" i]',
+      '[class*="canvas" i]',
+    ].join(", ")
+  );
+
+  const count = await design.count();
+  let bestIndex = -1;
+  let bestArea = 0;
+
+  for (let i = 0; i < count; i++) {
+    const candidate = design.nth(i);
+    if (!(await candidate.isVisible().catch(() => false))) continue;
+
+    const box = await candidate.boundingBox().catch(() => null);
+    if (!box) continue;
+
+    const area = box.width * box.height;
+    if (box.width >= 200 && box.height >= 150 && area > bestArea) {
+      bestArea = area;
+      bestIndex = i;
+    }
+  }
+
+  if (bestIndex === -1) {
+    throw new Error("Generated design surface could not be identified for toolbar scrolling.");
+  }
+
+  const box = await design.nth(bestIndex).boundingBox();
+  if (!box) {
+    throw new Error("Generated design surface has no bounding box for toolbar scrolling.");
+  }
+
+  const viewportHalf = await page.evaluate(() =>
+    Math.max(200, Math.round(window.innerHeight * 0.5))
+  );
+
+  // The pointer is deliberately placed on the generated-design canvas so the
+  // wheel event is handled by the canvas/frames scroller, not the left thread
+  // panel or the outer application page.
+  await page.mouse.move(
+    box.x + box.width / 2,
+    box.y + box.height / 2
+  );
+
+  await page.mouse.wheel(0, viewportHalf);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  // Second click after scrolling: this refreshes the selected frame's
+  // contextual toolbar in its now-visible position.
+  await selectGeneratedDesign(page);
+}
+
 async function openSourceCodePanel(page: Page): Promise<void> {
   await selectGeneratedDesign(page);
+
+  await revealGeneratedDesignToolbar(page);
 
   await clickIconButtonByHint(
     page,
