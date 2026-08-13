@@ -23,6 +23,8 @@ const selectors = {
     ),
   generateButton: (page: Page) =>
     page.getByRole("button", { name: /generate|send/i }),
+  stopButton: (page: Page) =>
+    page.getByRole("button", { name: /^stop$/i }),
   spinner: (page: Page) =>
     page
       .getByRole("status")
@@ -47,9 +49,7 @@ async function saveGenerationInputScreenshot(page: Page): Promise<void> {
   const screenshotsDir = path.join(process.cwd(), "screenshots");
   fs.mkdirSync(screenshotsDir, { recursive: true });
 
-  const timestamp = new Date()
-    .toISOString()
-    .replace(/[:.]/g, "-");
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 
   const screenshotPath = path.join(
     screenshotsDir,
@@ -66,12 +66,13 @@ async function saveGenerationInputScreenshot(page: Page): Promise<void> {
 
 async function getStoredProjectContext(page: Page): Promise<string> {
   try {
-    return await page.evaluate(() =>
-      (
-        window as unknown as {
-          __xmagicProjectPromptContext?: string;
-        }
-      ).__xmagicProjectPromptContext || ""
+    return await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __xmagicProjectPromptContext?: string;
+          }
+        ).__xmagicProjectPromptContext || ""
     );
   } catch {
     return "";
@@ -79,35 +80,88 @@ async function getStoredProjectContext(page: Page): Promise<string> {
 }
 
 async function isGenerationFinished(page: Page): Promise<boolean> {
-  const spinnerGone =
-    (await selectors.spinner(page).count()) === 0;
+  const stopVisible = await selectors
+    .stopButton(page)
+    .first()
+    .isVisible()
+    .catch(() => false);
+
+  if (stopVisible) return false;
+
+  const spinnerVisible = await selectors
+    .spinner(page)
+    .first()
+    .isVisible()
+    .catch(() => false);
+
+  if (spinnerVisible) return false;
+
   const previewVisible =
-    (await selectors.previewFrame(page).count()) > 0;
+    (await selectors.previewFrame(page).count()) > 0 &&
+    (await selectors.previewFrame(page).first().isVisible().catch(() => false));
+
   const exportVisible =
-    (await selectors.copyExportControls(page).count()) > 0;
+    (await selectors.copyExportControls(page).count()) > 0 &&
+    (await selectors.copyExportControls(page)
+      .first()
+      .isVisible()
+      .catch(() => false));
+
   const generateEnabled = await selectors
     .generateButton(page)
     .first()
     .isEnabled()
     .catch(() => false);
 
-  return (
-    spinnerGone &&
-    (previewVisible || exportVisible || generateEnabled)
-  );
+  return (previewVisible || exportVisible) && generateEnabled;
+}
+
+/**
+ * Waits indefinitely until UXPilot has genuinely finished generating.
+ * There is intentionally NO timeout and NO attempt to click a Stop button.
+ * The Stop button is only observed: while it is visible, generation is
+ * considered active and the worker keeps waiting.
+ */
+async function waitForGenerationToFinish(
+  page: Page,
+  label: string
+): Promise<void> {
+  const startedAt = Date.now();
+  let lastLogAt = startedAt;
+
+  while (true) {
+    if (await isGenerationFinished(page)) {
+      const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+      log.info(`${label} finished after ${elapsedSeconds}s.`);
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastLogAt >= 30_000) {
+      const elapsedSeconds = Math.round((now - startedAt) / 1000);
+      log.info(
+        `${label} is still running after ${elapsedSeconds}s. Waiting indefinitely for completion...`
+      );
+      lastLogAt = now;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+}
+
+async function waitForPromptInput(page: Page): Promise<ReturnType<Page["locator"]>> {
+  const promptInput = selectors.promptInput(page).first();
+  await promptInput.waitFor({ state: "visible", timeout: 0 });
+  return promptInput;
 }
 
 async function clickGenerateAndWait(
   page: Page,
-  timeoutMs: number,
+  _timeoutMs: number,
   label: string
 ): Promise<void> {
   await selectors.generateButton(page).first().click();
-  await waitUntil(() => isGenerationFinished(page), {
-    timeoutMs,
-    intervalMs: 2_000,
-    label,
-  });
+  await waitForGenerationToFinish(page, label);
 }
 
 async function attemptGenerateDesktop(
@@ -115,19 +169,13 @@ async function attemptGenerateDesktop(
   prompt: string,
   level: ProjectLevel
 ): Promise<void> {
-  const projectContext =
-    await getStoredProjectContext(page);
+  const projectContext = await getStoredProjectContext(page);
 
   const finalPrompt = projectContext
-    ? [
-        projectContext,
-        "",
-        "CURRENT PAGE PROMPT:",
-        prompt,
-      ].join("\n")
+    ? [projectContext, "", "CURRENT PAGE PROMPT:", prompt].join("\n")
     : prompt;
 
-  const promptInput = selectors.promptInput(page).first();
+  const promptInput = await waitForPromptInput(page);
   await promptInput.fill(finalPrompt);
 
   await new Promise((resolve) => setTimeout(resolve, 750));
@@ -136,7 +184,7 @@ async function attemptGenerateDesktop(
   await clickGenerateAndWait(
     page,
     config.timeouts.generateByLevel[level],
-    "desktop generation to finish"
+    "desktop generation"
   );
 }
 
@@ -166,11 +214,7 @@ async function attemptGenerateMobile(
   await selectors.generateButton(page).first().click();
   await selectors.generateMobileOption(page).first().click();
 
-  await waitUntil(() => isGenerationFinished(page), {
-    timeoutMs: config.timeouts.generateByLevel[level],
-    intervalMs: 2_000,
-    label: "mobile generation to finish",
-  });
+  await waitForGenerationToFinish(page, "mobile generation");
 }
 
 export async function generateMobile(
