@@ -301,43 +301,66 @@ async function clickDesignSurface(page: Page): Promise<void> {
 }
 
 async function prepareDesignToolbarForSourceCode(page: Page): Promise<void> {
-  // Exact live-UI flow requested:
-  // 1) click the generated page
+  // Exact live-UI flow:
+  // 1) select the generated page
   // 2) zoom the canvas all the way out to 5%
-  // 3) move onto the design and scroll down a little so the lower part of the page is visible
-  // 4) click the design again so UXPilot re-attaches/shows its floating toolbar
-  // 5) only then search for the Source Code (<>) button
+  // 3) select the generated page again after zooming
+  // 4) move onto the design and scroll down a little
+  // 5) select the generated page again so UXPilot re-attaches/shows its toolbar
+  // 6) only then search for the Source Code (<>) button
+
   await selectGeneratedDesign(page);
 
   await zoomOutToMinimum(page, 5);
 
-  let designBox: { x: number; y: number; width: number; height: number } | null = null;
+  // Zooming can deselect the generated page in UXPilot.
+  // Re-select it explicitly before doing anything else.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await selectGeneratedDesign(page);
+
+  let designBox: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null = null;
+
   try {
     const design = await findBestDesignSurface(page);
     designBox = await design.boundingBox().catch(() => null);
   } catch {
-    // The label fallback below can still position the mouse over the design area.
+    // The generated-screen label selection above is still valid.
   }
 
   if (designBox) {
     const x = designBox.x + designBox.width / 2;
     const y = designBox.y + designBox.height / 2;
+
     await page.mouse.move(x, y);
     await page.mouse.wheel(0, 650);
   } else {
-    // Keep the wheel event inside the central design workspace rather than on the app chrome.
     const viewport = page.viewportSize();
-    const x = viewport ? Math.round(viewport.width * 0.55) : 720;
-    const y = viewport ? Math.round(viewport.height * 0.55) : 450;
+
+    const x = viewport
+      ? Math.round(viewport.width * 0.55)
+      : 720;
+
+    const y = viewport
+      ? Math.round(viewport.height * 0.55)
+      : 450;
+
     await page.mouse.move(x, y);
     await page.mouse.wheel(0, 650);
   }
 
   await new Promise((resolve) => setTimeout(resolve, 500));
-  await clickDesignSurface(page);
 
-  // Give the floating toolbar a moment to reposition after the second selection.
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  // Explicitly select the generated page again after scrolling.
+  // This is the important step: scrolling can remove the UXPilot
+  // selection and hide the floating toolbar.
+  await selectGeneratedDesign(page);
+
+  await new Promise((resolve) => setTimeout(resolve, 800));
 }
 
 async function openSourceCodePanel(page: Page): Promise<void> {
