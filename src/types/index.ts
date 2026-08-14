@@ -115,6 +115,9 @@ export interface ProjectRow {
   runId: string;
   retryCount: number;
   lastError: string;
+
+  fullLogs: string;
+  fullUxPilotProjectPrompt: string;
 }
 
 /** Fields that the runner is allowed to patch back to the sheet mid-flight. */
@@ -133,5 +136,7 @@ export type ProjectRowUpdate = Partial<
     | "htmlFile"
     | "jsonFile"
     | "editsAfterDesign"
+    | "fullLogs"
+    | "fullUxPilotProjectPrompt"
   >
 >;
