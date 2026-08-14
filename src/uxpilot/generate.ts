@@ -207,7 +207,8 @@ async function clickGenerateAndWait(
 async function attemptGenerateDesktop(
   page: Page,
   prompt: string,
-  level: ProjectLevel
+  level: ProjectLevel,
+  onPromptReady?: (fullPrompt: string) => Promise<void>
 ): Promise<void> {
   const projectContext = await getStoredProjectContext(page);
 
@@ -233,6 +234,10 @@ async function attemptGenerateDesktop(
 
   await saveGenerationInputScreenshot(page);
 
+  if (onPromptReady) {
+    await onPromptReady(finalPrompt);
+  }
+
 
   await clickGenerateAndWait(
     page,
@@ -245,7 +250,8 @@ async function attemptGenerateDesktop(
 export async function generateDesktop(
   page: Page,
   prompt: string,
-  level: ProjectLevel
+  level: ProjectLevel,
+  onPromptReady?: (fullPrompt: string) => Promise<void>
 ): Promise<void> {
   log.info("Starting desktop generation...");
 
@@ -255,7 +261,8 @@ export async function generateDesktop(
       attemptGenerateDesktop(
         page,
         prompt,
-        level
+        level,
+        onPromptReady
       ),
     {
       retries: config.retries.generate,
