@@ -479,8 +479,55 @@ export async function copyToFigma(page: Page): Promise<void> {
   );
 
   const option = selectors.copyToFigmaOption(page);
-  await option.waitFor({ state: "visible", timeout: 5000 });
-  await option.click();
+
+  const optionVisible = await option
+    .isVisible()
+    .catch(() => false);
+
+  if (optionVisible) {
+    await option.click();
+  } else {
+    const clicked = await page.evaluate(() => {
+      const elements = Array.from(
+        document.querySelectorAll(
+          '[role="menuitem"], [role="option"], button, a, div, span'
+        )
+      );
+
+      const target = elements.find((element) => {
+        const rect = element.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) return false;
+
+        const style = window.getComputedStyle(element);
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden"
+        ) {
+          return false;
+        }
+
+        const text = (element.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
+
+        return text === "copy to figma";
+      });
+
+      if (!target) {
+        return false;
+      }
+
+      (target as HTMLElement).click();
+      return true;
+    });
+
+    if (!clicked) {
+      throw new Error(
+        "Could not find the 'Copy to Figma' option in the current UXPilot export menu."
+      );
+    }
+  }
 
   log.info(
     "Clicked 'Copy to Figma'. Waiting for Design copied notification..."
@@ -489,7 +536,10 @@ export async function copyToFigma(page: Page): Promise<void> {
   await waitUntil(
     async () =>
       (await selectors.figmaCopiedToast(page).count()) > 0 &&
-      (await selectors.figmaCopiedToast(page).first().isVisible().catch(() => false)),
+      (await selectors.figmaCopiedToast(page)
+        .first()
+        .isVisible()
+        .catch(() => false)),
     {
       timeoutMs: config.timeouts.figmaCopyToastMs,
       intervalMs: 500,
