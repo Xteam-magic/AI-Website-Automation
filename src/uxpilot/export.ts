@@ -85,63 +85,144 @@ async function clickIconButtonByHint(
 }
 
 async function selectGeneratedDesign(page: Page): Promise<void> {
-  const labels = selectors.generatedDesignLabels(page);
-  const labelCount = await labels.count();
-
-  for (let i = 0; i < labelCount; i++) {
-    const label = labels.nth(i);
-    if (!(await label.isVisible().catch(() => false))) continue;
-
-    try {
-      await label.click({ timeout: 5000 });
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      return;
-    } catch {
-      // Try next visible generated-screen label.
-    }
-  }
-
   const candidates = page.locator(
     [
+      'iframe[title*="preview" i]',
       '[data-testid*="canvas" i]',
-      '[data-testid*="design" i]',
-      '[data-testid*="frame" i]',
+      '[data-testid*="design-surface" i]',
       '[data-testid*="artboard" i]',
       '[class*="design-surface" i]',
-      '[class*="artboard" i]',
       '[class*="canvas" i]',
+      '[class*="artboard" i]',
+      '[class*="preview" i]',
     ].join(", ")
   );
 
   const count = await candidates.count();
-  let bestIndex = -1;
-  let bestArea = 0;
+
+  if (count === 0) {
+    throw new Error(
+      "No generated design surface was found on the UXPilot page."
+    );
+  }
+
+  const isDesignToolbarVisible = async (): Promise<boolean> => {
+    return page.evaluate(() => {
+      const buttons = Array.from(
+        document.querySelectorAll("button")
+      );
+
+      return buttons.some((button) => {
+        const rect = button.getBoundingClientRect();
+
+        if (rect.width < 1 || rect.height < 1) {
+          return false;
+        }
+
+        const style = window.getComputedStyle(button);
+
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden"
+        ) {
+          return false;
+        }
+
+        const metadata = [
+          button.getAttribute("aria-label"),
+          button.getAttribute("title"),
+          button.getAttribute("data-testid"),
+          button.textContent,
+          ...Array.from(
+            button.querySelectorAll("svg")
+          ).flatMap((svg) => [
+            svg.getAttribute("data-lucide"),
+            svg.getAttribute("aria-label"),
+            svg.getAttribute("class"),
+          ]),
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        return (
+          /source.*code/.test(metadata) ||
+          /lucide[-\s]?code/.test(metadata) ||
+          /copy.*export/.test(metadata) ||
+          /copy\/export/.test(metadata)
+        );
+      });
+    });
+  };
 
   for (let i = 0; i < count; i++) {
     const candidate = candidates.nth(i);
-    if (!(await candidate.isVisible().catch(() => false))) continue;
 
-    const box = await candidate.boundingBox().catch(() => null);
-    if (!box) continue;
+    const visible = await candidate
+      .isVisible()
+      .catch(() => false);
 
-    const area = box.width * box.height;
-    if (box.width >= 200 && box.height >= 150 && area > bestArea) {
-      bestArea = area;
-      bestIndex = i;
+    if (!visible) {
+      continue;
+    }
+
+    const box = await candidate
+      .boundingBox()
+      .catch(() => null);
+
+    if (!box) {
+      continue;
+    }
+
+    if (
+      box.width < 40 ||
+      box.height < 40
+    ) {
+      continue;
+    }
+
+    try {
+      log.info(
+        `Selecting generated design candidate ${i + 1}...`
+      );
+
+      await candidate.click({
+        position: {
+          x: box.width / 2,
+          y: box.height / 2,
+        },
+        timeout: 5000,
+      });
+
+      await waitUntil(
+        async () =>
+          await isDesignToolbarVisible(),
+        {
+          timeoutMs: 5000,
+          intervalMs: 250,
+          label:
+            "UXPilot design toolbar to appear after selecting the generated page",
+        }
+      );
+
+      log.info(
+        "Generated design selected successfully and its toolbar is visible."
+      );
+
+      return;
+    } catch (error) {
+      log.warn(
+        `Design candidate ${i + 1} did not become selected: ${
+          error instanceof Error
+            ? error.message
+            : String(error)
+        }`
+      );
     }
   }
 
-  if (bestIndex === -1) {
-    throw new Error("Generated design surface could not be identified.");
-  }
-
-  const design = candidates.nth(bestIndex);
-  const box = await design.boundingBox();
-  if (!box) throw new Error("Generated design surface has no bounding box.");
-
-  await page.mouse.click(
-    box.x + box.width / 2,
-    box.y + box.height / 2
+  throw new Error(
+    "Generated design was found, but clicking it did not activate its UXPilot toolbar."
   );
 }
 
@@ -300,81 +381,7 @@ async function clickDesignSurface(page: Page): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 400));
 }
 
-async function prepareDesignToolbarForSourceCode(page: Page): Promise<void> {
-  // Exact live-UI flow:
-  // 1) select the generated page
-  // 2) zoom the canvas all the way out to 5%
-  // 3) re-select the generated page after zooming
-  // 4) move onto the design and scroll down a little
-  // 5) re-select the generated page after scrolling so UXPilot re-attaches the toolbar
-  // 6) only then search for the Source Code (<>) button
-  await selectGeneratedDesign(page);
-
-  await zoomOutToMinimum(page, 5);
-
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  await selectGeneratedDesign(page);
-
-  let designBox: {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  } | null = null;
-
-  try {
-    const design = await findBestDesignSurface(page);
-    designBox = await design.boundingBox().catch(() => null);
-  } catch {
-    // The generated-screen label selection above is still valid.
-  }
-
-  if (designBox) {
-    const x = designBox.x + designBox.width / 2;
-    const y = designBox.y + designBox.height / 2;
-    await page.mouse.move(x, y);
-    await page.mouse.wheel(0, 650);
-  } else {
-    const viewport = page.viewportSize();
-    const x = viewport ? Math.round(viewport.width * 0.55) : 720;
-    const y = viewport ? Math.round(viewport.height * 0.55) : 450;
-    await page.mouse.move(x, y);
-    await page.mouse.wheel(0, 650);
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  await selectGeneratedDesign(page);
-  await new Promise((resolve) => setTimeout(resolve, 800));
-}
-
-async function openSourceCodePanel(page: Page): Promise<void> {
-  await prepareDesignToolbarForSourceCode(page);
-
-  await clickIconButtonByHint(
-    page,
-    [
-      /source.*code/i,
-      /view.*code/i,
-      /lucide[-\s]?code/i,
-      /code-2/i,
-      /brackets/i,
-      /^code$/i,
-    ],
-    "Source Code"
-  );
-
-  await waitUntil(
-    async () =>
-      (await selectors.sourceCodePanel(page).count()) > 0,
-    {
-      timeoutMs: 10000,
-      intervalMs: 250,
-      label: "Source Code panel to open",
-    }
-  );
-
-  log.info("Source Code panel opened.");
-}
+async function prepareDesignToolbarForSourceCode
 
 async function closeSourceCodePanel(page: Page): Promise<void> {
   const panelVisible = await selectors
