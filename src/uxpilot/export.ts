@@ -377,107 +377,46 @@ async function openSourceCodePanel(page: Page): Promise<void> {
 }
 
 async function closeSourceCodePanel(page: Page): Promise<void> {
-  const panel = selectors.sourceCodePanel(page).first();
-
-  const panelVisible = await panel
+  const panelVisible = await selectors
+    .sourceCodePanel(page)
+    .first()
     .isVisible()
     .catch(() => false);
 
-  if (!panelVisible) {
-    return;
-  }
+  if (!panelVisible) return;
 
-  const clickedCloseButton = await page.evaluate(() => {
-    const sourceCodeText = Array.from(
-      document.querySelectorAll("*")
-    ).find((element) => {
-      const text = (element.textContent || "")
-        .replace(/\s+/g, " ")
-        .trim();
+  const clicked = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll("button"));
 
-      return (
-        text === "Source Code" &&
-        (() => {
-          const rect = element.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0;
-        })()
-      );
-    });
+    for (const button of buttons) {
+      const rect = button.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) continue;
 
-    if (!sourceCodeText) {
-      return false;
-    }
+      const style = window.getComputedStyle(button);
+      if (style.visibility === "hidden" || style.display === "none") continue;
 
-    let container: HTMLElement | null =
-      sourceCodeText.parentElement;
+      const metadata = [
+        button.getAttribute("aria-label"),
+        button.getAttribute("title"),
+        button.getAttribute("data-testid"),
+        button.textContent,
+        ...Array.from(button.querySelectorAll("svg")).flatMap((svg) => [
+          svg.getAttribute("data-lucide"),
+          svg.getAttribute("aria-label"),
+          svg.getAttribute("class"),
+        ]),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
 
-    for (
-      let depth = 0;
-      depth < 8 && container;
-      depth++,
-      container = container.parentElement
-    ) {
-      const rect = container.getBoundingClientRect();
+      if (!/(close|dismiss|lucide-x|^x$)/i.test(metadata)) continue;
 
-      if (rect.width < 200 || rect.height < 100) {
-        continue;
-      }
-
-      const buttons = Array.from(
-        container.querySelectorAll("button")
-      );
-
-      for (const button of buttons) {
-        const buttonRect =
-          button.getBoundingClientRect();
-
-        if (
-          buttonRect.width < 1 ||
-          buttonRect.height < 1
-        ) {
-          continue;
-        }
-
-        const style =
-          window.getComputedStyle(button);
-
-        if (
-          style.display === "none" ||
-          style.visibility === "hidden"
-        ) {
-          continue;
-        }
-
-        const metadata = [
-          button.getAttribute("aria-label"),
-          button.getAttribute("title"),
-          button.getAttribute("data-testid"),
-          button.textContent,
-          ...Array.from(
-            button.querySelectorAll("svg")
-          ).flatMap((svg) => [
-            svg.getAttribute("data-lucide"),
-            svg.getAttribute("aria-label"),
-            svg.getAttribute("class"),
-          ]),
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
-
-        const looksLikeClose =
-          /close|dismiss|lucide-x/.test(metadata) ||
-          /^x$/.test(
-            (button.textContent || "")
-              .trim()
-              .toLowerCase()
-          );
-
-        if (looksLikeClose) {
-          (
-            button as HTMLButtonElement
-          ).click();
-
+      let parent: HTMLElement | null = button.parentElement;
+      for (let depth = 0; depth < 6 && parent; depth++, parent = parent.parentElement) {
+        const text = (parent.textContent || "").replace(/\s+/g, " ").trim();
+        if (/\bsource code\b/i.test(text)) {
+          button.click();
           return true;
         }
       }
@@ -486,15 +425,15 @@ async function closeSourceCodePanel(page: Page): Promise<void> {
     return false;
   });
 
-  if (!clickedCloseButton) {
-    await page.keyboard
-      .press("Escape")
-      .catch(() => undefined);
+  if (!clicked) {
+    await page.keyboard.press("Escape").catch(() => undefined);
   }
 
   await waitUntil(
     async () =>
-      !(await panel
+      !(await selectors
+        .sourceCodePanel(page)
+        .first()
         .isVisible()
         .catch(() => false)),
     {
@@ -503,9 +442,8 @@ async function closeSourceCodePanel(page: Page): Promise<void> {
       label: "Source Code panel to close",
     }
   );
-
-  log.info("Source Code panel closed.");
 }
+
 async function captureSourceCodeCopy(page: Page): Promise<string> {
   await clickIconButtonByHint(
     page,
@@ -556,18 +494,21 @@ async function captureSourceCodeDownload(page: Page): Promise<string> {
   return text;
 }
 
+/**
+ * Current live UXPilot route:
+ * Design click -> Zoom Out x2 -> Design click -> <> Source Code icon -> Copy icon.
+ * Download is only a fallback if clipboard copy fails.
+ */
 export async function copyAsHtml(page: Page): Promise<string> {
   log.info("Copying generated design HTML from Source Code...");
 
-  const html = await retry(
+  return retry(
     async () => {
       await openSourceCodePanel(page);
 
-      let capturedHtml = "";
-
+      let html = "";
       try {
-        capturedHtml =
-          await captureSourceCodeCopy(page);
+        html = await captureSourceCodeCopy(page);
       } catch (copyError) {
         log.warn(
           `Source Code copy failed, trying download fallback: ${
@@ -576,36 +517,17 @@ export async function copyAsHtml(page: Page): Promise<string> {
               : String(copyError)
           }`
         );
-
-        capturedHtml =
-          await captureSourceCodeDownload(page);
+        html = await captureSourceCodeDownload(page);
       }
 
-      if (
-        !capturedHtml ||
-        capturedHtml.trim().length === 0
-      ) {
-        throw new Error(
-          "Source Code returned empty HTML."
-        );
+      if (!html || html.trim().length === 0) {
+        throw new Error("Source Code returned empty HTML.");
       }
 
-      log.info(
-        `HTML captured successfully (${capturedHtml.length} characters).`
-      );
-
-      return capturedHtml;
+      log.info(`HTML captured successfully (${html.length} characters).`);
+      await closeSourceCodePanel(page);
+      return html;
     },
-    {
-      retries: config.retries.clipboard,
-      label: "Source Code HTML export",
-    }
-  );
-
-  await closeSourceCodePanel(page);
-
-  return html;
-},
     {
       retries: config.retries.clipboard,
       label: "Source Code HTML export",
