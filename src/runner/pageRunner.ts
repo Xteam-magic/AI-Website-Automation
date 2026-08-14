@@ -70,6 +70,16 @@ function saveHtmlToDisk(
   return filePath;
 }
 
+function readFullLogs(): string {
+  try {
+    return fs.existsSync(config.paths.logFile)
+      ? fs.readFileSync(config.paths.logFile, "utf-8")
+      : "";
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Returns the public GitHub Pages URL for a generated HTML file.
  * The GitHub Pages artifact is uploaded from downloads/, so downloads/
@@ -155,7 +165,42 @@ export async function runPage(
   await generateDesktop(
     page,
     prompt,
-    row.requiredProjectLevel
+    row.requiredProjectLevel,
+    async (fullPrompt) => {
+      const promptHeader =
+        `===== PAGE ${pageIndex}/${totalPages}: ${pageSpec.page} =====`;
+      const promptBlock =
+        `${promptHeader}\n${fullPrompt}`;
+
+      const existingPrompt =
+        row.fullUxPilotProjectPrompt?.trim() || "";
+
+      const promptBlocks = existingPrompt
+        ? existingPrompt
+            .split(/\n\n===== PAGE /)
+            .map((block, index) =>
+              index === 0
+                ? block
+                : `===== PAGE ${block}`
+            )
+            .filter(Boolean)
+        : [];
+      const filteredPromptBlocks = promptBlocks.filter(
+        (block) => !block.startsWith(promptHeader)
+      );
+      const fullProjectPrompt =
+        [...filteredPromptBlocks, promptBlock].join("\n\n");
+
+      await googleSheetService.updateRow(
+        row.rowNumber,
+        {
+          fullUxPilotProjectPrompt: fullProjectPrompt,
+        }
+      );
+
+      row.fullUxPilotProjectPrompt =
+        fullProjectPrompt;
+    }
   );
 
   await googleSheetService.updateRow(
@@ -214,10 +259,39 @@ export async function runPage(
     pageSpec.page
   );
 
+  const htmlEntry =
+    `${pageSpec.page}: ${htmlPublicUrl}`;
+
+  const existingHtml =
+    row.htmlFile?.trim() || "";
+
+  const htmlLines = existingHtml
+    ? existingHtml
+        .split(/\r?\n/)
+        .filter(
+          (line) =>
+            !line.startsWith(
+              `${pageSpec.page}: `
+            )
+        )
+    : [];
+
+  const htmlValue =
+    [...htmlLines, htmlEntry].join("\n");
+
   await googleSheetService.updateRow(
     row.rowNumber,
     {
-      htmlFile: htmlPublicUrl,
+      htmlFile: htmlValue,
+    }
+  );
+
+  row.htmlFile = htmlValue;
+
+  await googleSheetService.updateRow(
+    row.rowNumber,
+    {
+      fullLogs: readFullLogs(),
     }
   );
 
@@ -313,5 +387,12 @@ export async function runPage(
         ? " (mobile failed)"
         : ""
     }.`
+  );
+
+  await googleSheetService.updateRow(
+    row.rowNumber,
+    {
+      fullLogs: readFullLogs(),
+    }
   );
 }
