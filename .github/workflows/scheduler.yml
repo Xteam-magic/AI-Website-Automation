@@ -6,17 +6,22 @@ on:
     - cron: "0 * * * *"
   workflow_dispatch: {}
 
-# Never run two instances at once. If a run is still in progress when the next
-# hour's trigger fires, the new run waits for the previous one to finish rather
-# than starting a second browser in parallel.
 concurrency:
   group: ai-website-automation
   cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
   run-automation:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    environment:
+      name: github-pages
 
     steps:
       - name: Checkout Repository
@@ -48,9 +53,20 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: npm run build && npm start
 
+      - name: Upload Generated Website to GitHub Pages
+        if: always()
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: downloads/
+
+      - name: Deploy Generated Website to GitHub Pages
+        id: deployment
+        if: always()
+        uses: actions/deploy-pages@v4
+
       - name: Upload Logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: logs-${{ github.run_id }}
           path: logs/
@@ -59,7 +75,7 @@ jobs:
 
       - name: Upload Screenshots (only on failure)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: screenshots-${{ github.run_id }}
           path: screenshots/
