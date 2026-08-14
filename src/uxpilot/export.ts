@@ -304,17 +304,14 @@ async function prepareDesignToolbarForSourceCode(page: Page): Promise<void> {
   // Exact live-UI flow:
   // 1) select the generated page
   // 2) zoom the canvas all the way out to 5%
-  // 3) select the generated page again after zooming
+  // 3) re-select the generated page after zooming
   // 4) move onto the design and scroll down a little
-  // 5) select the generated page again so UXPilot re-attaches/shows its toolbar
+  // 5) re-select the generated page after scrolling so UXPilot re-attaches the toolbar
   // 6) only then search for the Source Code (<>) button
-
   await selectGeneratedDesign(page);
 
   await zoomOutToMinimum(page, 5);
 
-  // Zooming can deselect the generated page in UXPilot.
-  // Re-select it explicitly before doing anything else.
   await new Promise((resolve) => setTimeout(resolve, 500));
   await selectGeneratedDesign(page);
 
@@ -335,31 +332,18 @@ async function prepareDesignToolbarForSourceCode(page: Page): Promise<void> {
   if (designBox) {
     const x = designBox.x + designBox.width / 2;
     const y = designBox.y + designBox.height / 2;
-
     await page.mouse.move(x, y);
     await page.mouse.wheel(0, 650);
   } else {
     const viewport = page.viewportSize();
-
-    const x = viewport
-      ? Math.round(viewport.width * 0.55)
-      : 720;
-
-    const y = viewport
-      ? Math.round(viewport.height * 0.55)
-      : 450;
-
+    const x = viewport ? Math.round(viewport.width * 0.55) : 720;
+    const y = viewport ? Math.round(viewport.height * 0.55) : 450;
     await page.mouse.move(x, y);
     await page.mouse.wheel(0, 650);
   }
 
   await new Promise((resolve) => setTimeout(resolve, 500));
-
-  // Explicitly select the generated page again after scrolling.
-  // This is the important step: scrolling can remove the UXPilot
-  // selection and hide the floating toolbar.
   await selectGeneratedDesign(page);
-
   await new Promise((resolve) => setTimeout(resolve, 800));
 }
 
@@ -393,7 +377,71 @@ async function openSourceCodePanel(page: Page): Promise<void> {
 }
 
 async function closeSourceCodePanel(page: Page): Promise<void> {
-  await page.keyboard.press("Escape").catch(() => undefined);
+  const panelVisible = await selectors
+    .sourceCodePanel(page)
+    .first()
+    .isVisible()
+    .catch(() => false);
+
+  if (!panelVisible) return;
+
+  const clicked = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll("button"));
+
+    for (const button of buttons) {
+      const rect = button.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) continue;
+
+      const style = window.getComputedStyle(button);
+      if (style.visibility === "hidden" || style.display === "none") continue;
+
+      const metadata = [
+        button.getAttribute("aria-label"),
+        button.getAttribute("title"),
+        button.getAttribute("data-testid"),
+        button.textContent,
+        ...Array.from(button.querySelectorAll("svg")).flatMap((svg) => [
+          svg.getAttribute("data-lucide"),
+          svg.getAttribute("aria-label"),
+          svg.getAttribute("class"),
+        ]),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      if (!/(close|dismiss|lucide-x|^x$)/i.test(metadata)) continue;
+
+      let parent: HTMLElement | null = button.parentElement;
+      for (let depth = 0; depth < 6 && parent; depth++, parent = parent.parentElement) {
+        const text = (parent.textContent || "").replace(/\s+/g, " ").trim();
+        if (/\bsource code\b/i.test(text)) {
+          button.click();
+          return true;
+        }
+      }
+    }
+
+    return false;
+  });
+
+  if (!clicked) {
+    await page.keyboard.press("Escape").catch(() => undefined);
+  }
+
+  await waitUntil(
+    async () =>
+      !(await selectors
+        .sourceCodePanel(page)
+        .first()
+        .isVisible()
+        .catch(() => false)),
+    {
+      timeoutMs: 5000,
+      intervalMs: 250,
+      label: "Source Code panel to close",
+    }
+  );
 }
 
 async function captureSourceCodeCopy(page: Page): Promise<string> {
@@ -488,20 +536,66 @@ export async function copyAsHtml(page: Page): Promise<string> {
 }
 
 /**
- * Design click -> Copy/Export icon -> Copy to Figma -> wait for Design copied.
+ * Design selection -> close Source Code -> re-discover toolbar -> Figma action -> wait for Design copied.
  */
 export async function copyToFigma(page: Page): Promise<void> {
   log.info("Copying design to Figma...");
 
-  await selectGeneratedDesign(page);
-
-  await clickIconButtonByHint(
-    page,
-    [/copy.*export/i, /export/i, /copy\/export/i],
-    "Copy/Export"
-  );
+  // Fully close Source Code, then repeat the same toolbar discovery flow used
+  // for Source Code so UXPilot re-attaches the floating toolbar to the design.
+  await closeSourceCodePanel(page);
+  await prepareDesignToolbarForSourceCode(page);
 
   const option = selectors.copyToFigmaOption(page);
+
+  const waitForFigmaAction = async (): Promise<void> => {
+    await waitUntil(
+      async () => {
+        const optionVisible = await option
+          .isVisible()
+          .catch(() => false);
+
+        const toastVisible =
+          (await selectors.figmaCopiedToast(page).count()) > 0 &&
+          (await selectors.figmaCopiedToast(page)
+            .first()
+            .isVisible()
+            .catch(() => false));
+
+        return optionVisible || toastVisible;
+      },
+      {
+        timeoutMs: 10000,
+        intervalMs: 250,
+        label: "Copy to Figma action",
+      }
+    );
+  };
+
+  let actionReady = false;
+
+  try {
+    await clickIconButtonByHint(
+      page,
+      [/^figma$/i, /copy.*figma/i],
+      "Figma"
+    );
+
+    await waitForFigmaAction();
+    actionReady = true;
+  } catch {
+    // Some UXPilot builds expose Figma through Copy/Export instead.
+  }
+
+  if (!actionReady) {
+    await clickIconButtonByHint(
+      page,
+      [/copy.*export/i, /export/i, /copy\/export/i],
+      "Copy/Export"
+    );
+
+    await waitForFigmaAction();
+  }
 
   const optionVisible = await option
     .isVisible()
@@ -509,52 +603,10 @@ export async function copyToFigma(page: Page): Promise<void> {
 
   if (optionVisible) {
     await option.click();
-  } else {
-    const clicked = await page.evaluate(() => {
-      const elements = Array.from(
-        document.querySelectorAll(
-          '[role="menuitem"], [role="option"], button, a, div, span'
-        )
-      );
-
-      const target = elements.find((element) => {
-        const rect = element.getBoundingClientRect();
-        if (rect.width < 1 || rect.height < 1) return false;
-
-        const style = window.getComputedStyle(element);
-        if (
-          style.display === "none" ||
-          style.visibility === "hidden"
-        ) {
-          return false;
-        }
-
-        const text = (element.textContent || "")
-          .replace(/\s+/g, " ")
-          .trim()
-          .toLowerCase();
-
-        return text === "copy to figma";
-      });
-
-      if (!target) {
-        return false;
-      }
-
-      (target as HTMLElement).click();
-      return true;
-    });
-
-    if (!clicked) {
-      throw new Error(
-        "Could not find the 'Copy to Figma' option in the current UXPilot export menu."
-      );
-    }
+    log.info(
+      "Clicked 'Copy to Figma'. Waiting for Design copied notification..."
+    );
   }
-
-  log.info(
-    "Clicked 'Copy to Figma'. Waiting for Design copied notification..."
-  );
 
   await waitUntil(
     async () =>
