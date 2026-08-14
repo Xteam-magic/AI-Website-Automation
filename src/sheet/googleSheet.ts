@@ -63,6 +63,8 @@ const HEADER_MAP: Record<string, keyof ProjectRow> = {
   "Run ID": "runId",
   "Retry Count": "retryCount",
   "Last Error": "lastError",
+  "Full Logs": "fullLogs",
+  "Full ux pilio project prompt": "fullUxPilotProjectPrompt",
 };
 
 /** Converts a 0-based column index into its A1 letter (0 -> A, 26 -> AA, ...). */
@@ -184,9 +186,9 @@ export class GoogleSheetService {
     const projectRows: ProjectRow[] = [];
 
     dataRows.forEach((rawRow, i) => {
-      const rowNumber = i + 2; // header is row 1, sheet rows are 1-indexed
+      const rowNumber = i + 2;
       if (rawRow.every((cell) => String(cell ?? "").trim().length === 0)) {
-        return; // skip fully blank rows
+        return;
       }
 
       const byHeader: Record<string, string> = {};
@@ -198,8 +200,6 @@ export class GoogleSheetService {
       const row: ProjectRow = {
         rowNumber,
         projectId: get("Project ID"),
-        // Deliberately NOT defaulted to "Start" — a blank Status must never
-        // be picked up as a project to run.
         status: get("Status").trim() as ProjectStatus,
         projectName: get("Project Name"),
         requiredProjectLevel: (get("Required Project Level").trim() || "Medium") as ProjectLevel,
@@ -238,6 +238,8 @@ export class GoogleSheetService {
         runId: get("Run ID"),
         retryCount: parseNumber(get("Retry Count"), 0),
         lastError: get("Last Error"),
+        fullLogs: get("Full Logs"),
+        fullUxPilotProjectPrompt: get("Full ux pilio project prompt"),
       };
 
       if (row.countPage === 0 && row.pages.length > 0) {
@@ -250,12 +252,6 @@ export class GoogleSheetService {
     return projectRows;
   }
 
-  /**
-   * Picks exactly one row to run this invocation, in the confirmed priority
-   * order: Resume (Running) -> Edits After Design (Completed + edits
-   * pending) -> new Start project. Returns null if nothing needs to run,
-   * which is a normal, successful outcome (the workflow just exits).
-   */
   selectNextRow(rows: ProjectRow[]): { row: ProjectRow; mode: "resume" | "edit" | "start" } | null {
     const running = rows.find((r) => r.status === "Running");
     if (running) {
