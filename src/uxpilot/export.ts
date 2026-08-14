@@ -971,143 +971,130 @@ export async function copyAsHtml(
 }
 
 /**
- * Select generated design -> re-discover toolbar -> Figma -> Copy to Figma
- * -> wait for Design copied.
+ * Select the generated design -> open UXPilot Export -> choose Figma under
+ * COPY TO -> click the bottom "Export 1 screen" action -> wait for the
+ * "1 screen copied! Paste to Figma ..." notification.
  */
 export async function copyToFigma(
   page: Page
 ): Promise<void> {
-  log.info(
-    "Copying design to Figma..."
+  log.info("Copying design to Figma...");
+
+  // Source Code may still be open after HTML capture.
+  await closeSourceCodePanel(page);
+
+  // Re-attach the floating toolbar to the actual generated screen.
+  await prepareDesignToolbarForSourceCode(page);
+
+  // Open the UXPilot Export panel from the selected design toolbar.
+  await clickIconButtonByHint(
+    page,
+    [
+      /^export$/i,
+      /copy.*export/i,
+      /copy\/export/i,
+    ],
+    "Export"
   );
 
-  // Source Code must be closed before re-attaching the design toolbar.
-  await closeSourceCodePanel(
-    page
-  );
-
-  // Repeat the same reliable select/zoom/scroll/select flow used for
-  // Source Code, so UXPilot re-attaches the floating toolbar to the design.
-  await prepareDesignToolbarForSourceCode(
-    page
-  );
-
-  const option =
-    selectors.copyToFigmaOption(
-      page
+  const selectedFigma = await page.evaluate(() => {
+    const elements = Array.from(
+      document.querySelectorAll("*")
     );
 
-  const waitForFigmaAction =
-    async (): Promise<void> => {
-      await waitUntil(
-        async () => {
-          const optionVisible =
-            await option
-              .isVisible()
-              .catch(() => false);
+    for (const element of elements) {
+      const rect = element.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) continue;
 
-          const toastVisible =
-            (
-              await selectors
-                .figmaCopiedToast(
-                  page
-                )
-                .count()
-            ) > 0 &&
-            (
-              await selectors
-                .figmaCopiedToast(
-                  page
-                )
-                .first()
-                .isVisible()
-                .catch(() => false)
-            );
+      const style = window.getComputedStyle(element);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden"
+      ) {
+        continue;
+      }
 
-          return (
-            optionVisible ||
-            toastVisible
-          );
-        },
-        {
-          timeoutMs: 10000,
-          intervalMs: 250,
-          label:
-            "Copy to Figma action",
+      const text =
+        (element.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim();
+
+      if (text !== "Figma") continue;
+
+      let parent = element.parentElement;
+
+      for (
+        let depth = 0;
+        depth < 8 && parent;
+        depth++,
+          parent = parent.parentElement
+      ) {
+        const parentText =
+          (parent.textContent || "")
+            .replace(/\s+/g, " ")
+            .trim();
+
+        if (/COPY TO/i.test(parentText)) {
+          (element as HTMLElement).click();
+          return true;
         }
-      );
-    };
+      }
+    }
 
-  let actionReady = false;
+    return false;
+  });
 
-  try {
-    await clickIconButtonByHint(
-      page,
-      [
-        /^figma$/i,
-        /copy.*figma/i,
-      ],
-      "Figma"
-    );
-
-    await waitForFigmaAction();
-    actionReady = true;
-  } catch {
-    // Some UXPilot builds expose Figma through Copy/Export instead.
-  }
-
-  if (!actionReady) {
-    await clickIconButtonByHint(
-      page,
-      [
-        /copy.*export/i,
-        /export/i,
-        /copy\/export/i,
-      ],
-      "Copy/Export"
-    );
-
-    await waitForFigmaAction();
-  }
-
-  const optionVisible =
-    await option
-      .isVisible()
-      .catch(() => false);
-
-  if (optionVisible) {
-    await option.click();
-
-    log.info(
-      "Clicked 'Copy to Figma'. Waiting for Design copied notification..."
+  if (!selectedFigma) {
+    throw new Error(
+      "Could not find the Figma option under COPY TO in the UXPilot Export panel."
     );
   }
+
+  log.info("Selected Figma under COPY TO.");
+
+  const exportScreenButton = page.getByRole(
+    "button",
+    { name: /export\s+1\s+screen/i }
+  ).or(
+    page.getByText(/export\s+1\s+screen/i)
+  ).last();
+
+  await exportScreenButton.waitFor({
+    state: "visible",
+    timeout: 10000,
+  });
+
+  await exportScreenButton.click();
+
+  log.info(
+    "Clicked 'Export 1 screen'. Waiting for the Figma copy confirmation..."
+  );
 
   await waitUntil(
-    async () =>
-      (
-        await selectors
-          .figmaCopiedToast(page)
-          .count()
-      ) > 0 &&
-      (
-        await selectors
-          .figmaCopiedToast(page)
-          .first()
-          .isVisible()
-          .catch(() => false)
-      ),
+    async () => {
+      const copiedToast = page.getByText(
+        /1\s+screen\s+copied/i
+      ).or(
+        page.getByText(
+          /paste\s+to\s+figma/i
+        )
+      );
+
+      return (
+        (await copiedToast.count()) > 0 &&
+        (await copiedToast.last().isVisible().catch(() => false))
+      );
+    },
     {
       timeoutMs:
-        config.timeouts
-          .figmaCopyToastMs,
+        config.timeouts.figmaCopyToastMs,
       intervalMs: 500,
       label:
-        '"Design copied" notification',
+        '"1 screen copied" Figma notification',
     }
   );
 
   log.info(
-    'Received "Design copied" notification.'
+    'Received "1 screen copied" notification. Paste to Figma can continue.'
   );
 }
