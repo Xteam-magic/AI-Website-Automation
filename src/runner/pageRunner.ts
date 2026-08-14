@@ -72,6 +72,8 @@ function saveHtmlToDisk(
 
 /**
  * Returns the public GitHub Pages URL for a generated HTML file.
+ * The GitHub Pages artifact is uploaded from downloads/, so downloads/
+ * itself is the publishing root and is not part of the public URL.
  */
 function buildHtmlPublicUrl(
   projectId: string,
@@ -82,7 +84,7 @@ function buildHtmlPublicUrl(
 
   return (
     `https://xteam-magic.github.io/AI-Website-Automation/` +
-    `downloads/${encodedProjectId}/${encodedPageName}/index.html`
+    `${encodedProjectId}/${encodedPageName}/index.html`
   );
 }
 
@@ -108,7 +110,6 @@ export async function runPage(
   } = params;
 
   const { page, context } = session;
-
   const pageLog = logger.scope(
     `Page:${pageSpec.page}`
   );
@@ -182,7 +183,6 @@ export async function runPage(
     } catch (err) {
       if (err instanceof MobileGenerateError) {
         mobileFailed = true;
-
         pageLog.warn(
           `Mobile generation failed, keeping the desktop result: ${err.message}`
         );
