@@ -116,26 +116,32 @@ export function buildProjectPromptContext(row: ProjectRow): string {
     readField(row, ["userSuggestions", "userSuggestion", "User Suggestions", "User Suggestion", "user_suggestions"])
   );
 
+  const structuredFields = [
+    ["PROJECT NAME", formatField(readField(row, ["projectName", "Project Name"]))],
+    ["FULL PROJECT DOC", fullProjectDoc],
+    ["DESIGN SYSTEM", formatField(readField(row, ["designSystem", "Design System"]))],
+    ["BRAND DESCRIPTION", formatField(readField(row, ["brandDescription", "Brand Description"]))],
+    ["COLOR PALETTE", formatField(readField(row, ["colorPalette", "Color Palette"]))],
+    ["PAGES", pages],
+    ["COUNT PAGE", formatField(readField(row, ["countPage", "Count Page"]))],
+    ["FONTS", fonts],
+    ["LANGUAGE", language],
+    ["SOURCE LINKS", formatField(readField(row, ["sourceLinks", "Source Links"]))],
+    ["MOBILE VERSION", formatField(readField(row, ["mobileVersion", "Mobile Version"]))],
+    ["FIGMA NEEDED", formatField(readField(row, ["figmaNeeded", "Figma Needed"]))],
+    ["CLIENT DEV METHOD", formatField(readField(row, ["clientDevMethod", "Client Dev Method"]))],
+    ["IMPLEMENTATION", formatField(readField(row, ["implementation", "Implementation"]))],
+    ["DEADLINE", formatField(readField(row, ["deadline", "Deadline"]))],
+    ["AI SUGGESTIONS", aiSuggestions],
+    ["USER SUGGESTIONS", userSuggestions],
+  ];
+
   return [
     "PROJECT CONTEXT",
     "",
-    "FULL PROJECT DOC:",
-    fullProjectDoc || "(empty)",
-    "",
-    "PAGES:",
-    pages || "(empty)",
-    "",
-    "FONTS:",
-    fonts || "(empty)",
-    "",
-    "LANGUAGE:",
-    language || "(empty)",
-    "",
-    "AI SUGGESTIONS:",
-    aiSuggestions || "(empty)",
-    "",
-    "USER SUGGESTIONS:",
-    userSuggestions || "(empty)",
+    ...structuredFields.flatMap(([label, value]) => [`${label}:`, value || "(empty)", ""]),
+    "RULE: The current page is generated independently. Do not collapse multiple pages into one screen.",
+    "RULE: Keep all supplied project constraints; page-specific instructions are authoritative only for the current page.",
   ].join("\n");
 }
 
