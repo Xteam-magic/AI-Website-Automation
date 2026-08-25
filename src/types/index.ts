@@ -1,11 +1,10 @@
 /**
  * Shared type definitions used across the whole project.
- * This is the single source of truth for the shape of a Google Sheet row
- * and for the closed vocabularies (Status / Current Step) the rest of the
- * system relies on.
+ * The Google Sheet remains the source of truth, but unknown/future columns are
+ * preserved in `rawColumns` so the phase-2 AI engine can reason over every live
+ * column without requiring a code release for each new sheet column.
  */
 
-/** Canonical Status values. Nothing else may ever be written to the Status column. */
 export type ProjectStatus =
   | "Start"
   | "Running"
@@ -13,20 +12,22 @@ export type ProjectStatus =
   | "Generated"
   | "Waiting Export"
   | "Completed"
+  | "AI Running"
   | "Error Login"
   | "Error Generate"
   | "Error Export"
   | "Error Elementor"
+  | "Error AI"
   | "Needs Review"
   | "Paused";
 
-/** Canonical Current Step values, used for resume + debugging. */
 export type CurrentStep =
   | "Idle"
   | "Read Sheet"
   | "Login"
   | "Create Project"
   | "Open Project"
+  | "Resolve Drive Content"
   | "Upload Context"
   | "Upload Website"
   | "Upload Images"
@@ -35,35 +36,32 @@ export type CurrentStep =
   | "Export HTML"
   | "Copy To Figma"
   | "Paste Figma"
+  | "Elementor Login"
   | "Elementor Convert"
   | "Download JSON"
   | "Send Email"
   | "Update Sheet"
+  | "AI Load Context"
+  | "AI Plan"
+  | "AI Execute"
+  | "AI Verify"
+  | "AI Completed"
   | "Completed";
 
 export type ProjectLevel = "High" | "Medium" | "Low";
-
 export type YesNo = "Yes" | "No";
-
 export type ClientDevMethod = "Elementor" | "HTML" | string;
 
-/** One entry of the structured `Pages` JSON column. */
 export interface PageSpec {
   page: string;
   description: string;
 }
 
-/** One entry of the structured `Edits After Design` JSON column. */
 export interface EditSpec {
   page: string;
   edit: string;
 }
 
-/**
- * A single Google Sheet row, fully parsed and typed.
- * `rowNumber` is the 1-based row index in the sheet (needed to write updates
- * back to the exact same row).
- */
 export interface ProjectRow {
   rowNumber: number;
 
@@ -94,6 +92,7 @@ export interface ProjectRow {
   figmaNeeded: YesNo;
   mobileVersion: YesNo;
   clientDevMethod: ClientDevMethod;
+  implementation: YesNo;
 
   deadline: string;
   projectCost: string;
@@ -105,6 +104,11 @@ export interface ProjectRow {
   designUrl: string;
   htmlFile: string;
   jsonFile: string;
+
+  uxPilotAccount: string;
+  convElementorAccount: string;
+  aiTokenAccount: string;
+  aiEngineNote: string;
 
   editsAfterDesign: EditSpec[];
 
@@ -118,9 +122,13 @@ export interface ProjectRow {
 
   fullLogs: string;
   fullUxPilotProjectPrompt: string;
+
+  /** Exact live header names and values from the current sheet. */
+  rawColumns: Record<string, string>;
+  /** Exact live headers as returned by the sheet. */
+  headers: string[];
 }
 
-/** Fields that the runner is allowed to patch back to the sheet mid-flight. */
 export type ProjectRowUpdate = Partial<
   Pick<
     ProjectRow,
@@ -138,5 +146,12 @@ export type ProjectRowUpdate = Partial<
     | "editsAfterDesign"
     | "fullLogs"
     | "fullUxPilotProjectPrompt"
+    | "aiEngineNote"
+    | "projectCost"
   >
 >;
+
+export interface SheetColumnUpdate {
+  header: string;
+  value: string;
+}
