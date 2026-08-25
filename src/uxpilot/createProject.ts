@@ -253,6 +253,57 @@ async function waitForComposerAttachment(page: Page): Promise<void> {
   });
 }
 
+async function isVisible(locator: ReturnType<Page["locator"]>): Promise<boolean> {
+  try {
+    return await locator.isVisible();
+  } catch {
+    return false;
+  }
+}
+
+async function closeModelPicker(page: Page): Promise<void> {
+  const slider = selectors.modelSlider(page).first();
+
+  // Keep the original Escape behavior, but do not rely on it.
+  await page.keyboard.press("Escape").catch(() => undefined);
+
+  if (!(await isVisible(slider))) {
+    return;
+  }
+
+  log.info("Model picker is still open after Escape. Clicking outside the picker...");
+
+  // In the current UXPilot editor the picker is anchored over the composer.
+  // A click on the main editor heading is outside that overlay and reproduces
+  // the same close-on-outside-click behavior that worked in the original flow.
+  const designHeading = page
+    .getByRole("heading", { name: /what would you like to design\?/i })
+    .first();
+
+  if (await isVisible(designHeading)) {
+    await designHeading.click();
+  } else {
+    const viewport = page.viewportSize();
+    const x = Math.max(
+      40,
+      Math.min((viewport?.width ?? 1440) - 120, Math.floor((viewport?.width ?? 1440) * 0.72))
+    );
+    const y = Math.max(80, Math.floor((viewport?.height ?? 900) * 0.2));
+    await page.mouse.click(x, y);
+  }
+
+  await waitUntil(
+    async () => !(await isVisible(slider)),
+    {
+      timeoutMs: 5000,
+      intervalMs: 100,
+      label: "UXPilot model picker to close",
+    }
+  );
+
+  log.info("Model picker closed successfully.");
+}
+
 async function appendProjectContextToComposer(
   page: Page,
   row: ProjectRow
@@ -262,10 +313,33 @@ async function appendProjectContextToComposer(
     (window as unknown as { __xmagicProjectPromptContext?: string }).__xmagicProjectPromptContext = value;
   }, context);
 
+  // The model picker can remain visually open even after the model value has
+  // changed. Close it and verify the actual composer is exposed before filling.
+  await closeModelPicker(page);
+
   const prompt = selectors.mainPromptInput(page).first();
-  await prompt.focus();
+  await prompt.waitFor({ state: "visible", timeout: 10000 });
+  await prompt.click();
   await prompt.fill(context);
-  log.info("Project context added to the main UXPilot composer and stored for final generation.");
+
+  await waitUntil(
+    async () => {
+      try {
+        return (await prompt.inputValue()) === context;
+      } catch {
+        return false;
+      }
+    },
+    {
+      timeoutMs: 5000,
+      intervalMs: 100,
+      label: "UXPilot main composer to contain project context",
+    }
+  );
+
+  log.info(
+    `Project context added to the main UXPilot composer and verified (${context.length} chars).`
+  );
 }
 
 async function dismissOptionalPopup(page: Page): Promise<void> {
@@ -322,7 +396,7 @@ async function selectModelUsingSlider(page: Page, targetModel: string): Promise<
   }
 
   if (currentIndex === targetIndex) {
-    await page.keyboard.press("Escape").catch(() => undefined);
+    await closeModelPicker(page);
     return;
   }
 
@@ -359,7 +433,7 @@ async function selectModelUsingSlider(page: Page, targetModel: string): Promise<
     }
   );
 
-  await page.keyboard.press("Escape").catch(() => undefined);
+  await closeModelPicker(page);
   log.info(`Model "${targetModel}" selected successfully.`);
 }
 
