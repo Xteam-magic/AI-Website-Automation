@@ -214,3 +214,34 @@ Completed
 > این پنج داکیومنت مرجع کامل پروژه هستند. ابتدا هر پنج فایل را به طور کامل مطالعه و تحلیل کن، سپس وابستگی‌ها و تناقض‌های احتمالی را برطرف کن و بعد از آن بدون استفاده از Placeholder یا TODO، کل پروژه را مرحله‌به‌مرحله پیاده‌سازی کن. قبل از شروع کدنویسی، یک خلاصه از معماری نهایی و برنامه اجرای خود ارائه بده و سپس توسعه را آغاز کن.
 
 این روش باعث می‌شود Claude قبل از تولید کد، کل تصویر پروژه را درک کند و کیفیت خروجی به‌مراتب بهتر از زمانی باشد که هر بخش را جداگانه پردازش کند.
+
+---
+
+# Version 2 implementation additions
+
+The live sheet may contain columns that are not known to the initial codebase. The engine therefore reads the full live header row dynamically and preserves every column/value in `rawColumns`. Phase 2 AI receives the full live row, not only the fixed schema below, and can update any existing column by exact header name.
+
+Known workflow columns added after Version 1:
+
+| ستون | کاربرد |
+|---|---|
+| UX Pilot Account | ایمیل ورود UXPilot برای همین پروژه؛ password مشترک از GitHub Actions |
+| CONV Elementor Account | ایمیل ورود ابزار تبدیل Elementor برای همین پروژه؛ password مشترک از GitHub Actions |
+| Implementation | فقط `Yes` باعث اجرای مرحلهٔ تبدیل/پیاده‌سازی بعد از Design می‌شود |
+| AI Token Account | کلید API فاز دوم همان پروژه |
+| AI Engine Note | حافظهٔ عملیاتی/تصمیم‌های Phase 2؛ توسط AI قابل به‌روزرسانی |
+
+Content-link rule:
+
+هر سلولی که مقدار آن یک لینک Google Drive قابل تشخیص باشد، قبل از ورود به UXPilot در یک تب جدید مرورگر باز می‌شود و محتوای کامل فایل خوانده می‌شود. برای `Pages` محتوا می‌تواند JSON، بلوک‌های `Page: Name` یا Markdown headings باشد و به `PageSpec[]` تبدیل می‌شود.
+
+Output rule:
+
+`HTML File` و `JSON File` برای پروژه‌های چندصفحه‌ای چندخطی هستند و برای هر صفحه یک ورودی مستقل با فرمت زیر نوشته می‌شود:
+
+```text
+صفحه ی پیشخوان : لینک
+صفحه ی محصول : لینک
+```
+
+Phase 2 is started only after every phase-1 page has completed its own design/export path. Phase 1 itself never calls the AI engine.
