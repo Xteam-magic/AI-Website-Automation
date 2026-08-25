@@ -998,47 +998,62 @@ export async function copyToFigma(
   );
 
   const selectedFigma = await page.evaluate(() => {
-    const elements = Array.from(
-      document.querySelectorAll("*")
-    );
-
-    for (const element of elements) {
+    const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+    const visible = (element: Element) => {
       const rect = element.getBoundingClientRect();
-      if (rect.width < 1 || rect.height < 1) continue;
-
       const style = window.getComputedStyle(element);
-      if (
-        style.display === "none" ||
-        style.visibility === "hidden"
-      ) {
-        continue;
-      }
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
 
-      const text =
-        (element.textContent || "")
-          .replace(/\s+/g, " ")
-          .trim();
+    const exactFigmaNodes = Array.from(document.querySelectorAll("*"))
+      .filter((element) => visible(element) && normalize(element.textContent || "") === "Figma");
 
-      if (text !== "Figma") continue;
-
-      let parent = element.parentElement;
-
-      for (
-        let depth = 0;
-        depth < 8 && parent;
-        depth++,
-          parent = parent.parentElement
-      ) {
-        const parentText =
-          (parent.textContent || "")
-            .replace(/\s+/g, " ")
-            .trim();
-
-        if (/COPY TO/i.test(parentText)) {
-          (element as HTMLElement).click();
-          return true;
+    for (const node of exactFigmaNodes) {
+      // Reject a nested "Figma" word that belongs to a longer Export To card such
+      // as "Figma (Nodey plugin)" or "Figma (FIG file)". The correct COPY TO
+      // option has a smallest clickable/card ancestor whose full visible text is
+      // exactly "Figma".
+      let card: HTMLElement | null = null;
+      let cursor: HTMLElement | null = node as HTMLElement;
+      for (let depth = 0; depth < 7 && cursor; depth++, cursor = cursor.parentElement) {
+        const cardText = normalize(cursor.innerText || cursor.textContent || "");
+        const hasControl = Boolean(
+          cursor.matches('label, button, [role="radio"]') ||
+          cursor.querySelector('input[type="radio"], [role="radio"], button')
+        );
+        if (cardText === "Figma" && hasControl) {
+          card = cursor;
+          break;
         }
       }
+
+      if (!card) continue;
+
+      let inCopyTo = false;
+      let section: HTMLElement | null = card;
+      for (let depth = 0; depth < 9 && section; depth++, section = section.parentElement) {
+        const sectionText = normalize(section.innerText || section.textContent || "");
+        if (/^COPY TO\b/i.test(sectionText) || /\bCOPY TO\b/i.test(sectionText)) {
+          inCopyTo = true;
+          break;
+        }
+      }
+      if (!inCopyTo) continue;
+
+      (card as HTMLElement).click();
+
+      const checked = Boolean(
+        card.querySelector('input[type="radio"]:checked, [role="radio"][aria-checked="true"]')
+      );
+      const classText = `${card.className || ""} ${card.parentElement?.className || ""}`;
+      const selectedState = /selected|active|checked/i.test(classText);
+
+      if (!checked && !selectedState) {
+        const label = card.closest('label') as HTMLElement | null;
+        if (label && label !== card) label.click();
+      }
+
+      return true;
     }
 
     return false;
@@ -1046,11 +1061,11 @@ export async function copyToFigma(
 
   if (!selectedFigma) {
     throw new Error(
-      "Could not find the Figma option under COPY TO in the UXPilot Export panel."
+      "Could not select the standalone Figma option under COPY TO. Export options such as Figma (Nodey plugin) are intentionally excluded."
     );
   }
 
-  log.info("Selected Figma under COPY TO.");
+  log.info("Selected standalone Figma under COPY TO (Figma Nodey plugin excluded).");
 
   const exportScreenButton = page.getByRole(
     "button",
