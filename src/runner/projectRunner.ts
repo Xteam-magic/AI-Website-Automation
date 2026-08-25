@@ -5,7 +5,7 @@ import { logger } from "../logger/logger";
 import { config } from "../config/config";
 import { login } from "../uxpilot/login";
 import { setupProjectContext } from "../uxpilot/createProject";
-import { openExistingProject } from "../uxpilot/editProject";
+import { openExistingProject, tryOpenExistingProject } from "../uxpilot/editProject";
 import { captureErrorScreenshot } from "../helpers/screenshot";
 import {
   sendErrorEmail,
@@ -13,6 +13,8 @@ import {
   sendProjectStartedEmail,
 } from "../gmail/mail";
 import { runPage } from "./pageRunner";
+import { hydrateProjectRowFromDrive } from "../sheet/contentResolver";
+import { runPhase2Ai } from "../ai/engine";
 import {
   CurrentStep,
   PageSpec,
@@ -46,6 +48,7 @@ function mapStepToErrorStatus(step: string): ProjectStatus {
   if (s.includes("generate")) return "Error Generate";
   if (s.includes("export") || s.includes("html") || s.includes("figma")) return "Error Export";
   if (s.includes("elementor") || s.includes("json")) return "Error Elementor";
+  if (s.includes("ai")) return "Error AI";
   return "Needs Review";
 }
 
@@ -220,6 +223,7 @@ export async function runProject(
   mode: RunMode
 ): Promise<void> {
   let currentStep: CurrentStep = "Login";
+  let phase2AlreadyRan = false;
 
   try {
     const runStartUpdate: Parameters<
@@ -233,9 +237,13 @@ export async function runProject(
 
     if (mode === "start") {
       runStartUpdate.htmlFile = "";
+      runStartUpdate.jsonFile = "";
+      runStartUpdate.aiEngineNote = "";
       runStartUpdate.fullLogs = "";
       runStartUpdate.fullUxPilotProjectPrompt = "";
       row.htmlFile = "";
+      row.jsonFile = "";
+      row.aiEngineNote = "";
       row.fullLogs = "";
       row.fullUxPilotProjectPrompt = "";
     }
@@ -244,6 +252,8 @@ export async function runProject(
       row.rowNumber,
       runStartUpdate
     );
+
+    await hydrateProjectRowFromDrive(session.context, row);
 
     if (mode === "start") {
       await sendProjectStartedEmail({
@@ -254,9 +264,17 @@ export async function runProject(
       });
     }
 
-    await login(session.page);
+    const resumeAtAiPhase = mode === "resume" && (row.status === "AI Running" || row.currentStep.startsWith("AI "));
 
-    if (mode === "edit") {
+    if (resumeAtAiPhase) {
+      currentStep = "AI Load Context";
+      await googleSheetService.updateRow(row.rowNumber, { currentStep });
+      await runPhase2Ai(session.context, row, session.page);
+      phase2AlreadyRan = true;
+    } else {
+      await login(session.page, row.uxPilotAccount);
+
+      if (mode === "edit") {
       currentStep = "Open Project";
       await googleSheetService.updateRow(
         row.rowNumber,
@@ -280,31 +298,23 @@ export async function runProject(
       (mode === "resume" && !row.designUrl)
     ) {
       currentStep = "Create Project";
-      await googleSheetService.updateRow(
-        row.rowNumber,
-        { currentStep }
-      );
+      await googleSheetService.updateRow(row.rowNumber, { currentStep });
 
-      await setupProjectContext(
-        session.page,
-        row
-      );
+      const existingProjectOpened = await tryOpenExistingProject(session.page, row.projectName);
+      if (!existingProjectOpened) {
+        await setupProjectContext(session.page, row);
+      }
 
-      await googleSheetService.updateRow(
-        row.rowNumber,
-        {
-          designUrl:
-            session.page.url(),
-        }
-      );
+      await googleSheetService.updateRow(row.rowNumber, {
+        designUrl: session.page.url(),
+      });
+      row.designUrl = session.page.url();
 
       currentStep = "Generate Desktop";
       await runAllPages(
         session,
         row,
-        mode === "resume"
-          ? row.currentPage || undefined
-          : undefined
+        mode === "resume" ? row.currentPage || undefined : undefined
       );
     } else {
       currentStep = "Open Project";
@@ -324,6 +334,13 @@ export async function runProject(
         row,
         row.currentPage || undefined
       );
+      }
+    }
+
+    if (!phase2AlreadyRan) {
+      currentStep = "AI Load Context";
+      await googleSheetService.updateRow(row.rowNumber, { currentStep, status: "AI Running" });
+      await runPhase2Ai(session.context, row, session.page);
     }
 
     await googleSheetService.updateRow(
