@@ -32,9 +32,11 @@ const selectors = {
   modelSlider: (page: Page) =>
     page.locator("div.relative.cursor-pointer.touch-none").last(),
   mainPromptInput: (page: Page) =>
-    page.locator(
-      'textarea[placeholder="Describe your design, @ to reference images or documents"]'
-    ),
+    page.locator(`
+      textarea[placeholder="Describe your design, @ to reference images or documents"],
+      [contenteditable="true"][role="textbox"],
+      [contenteditable="true"]
+    `),
   composerToolbar: (page: Page) =>
     page.locator('[data-testid="chat-composer-toolbar"]').first(),
   addWebsiteButton: (page: Page) =>
@@ -502,6 +504,81 @@ async function closeModelPicker(page: Page): Promise<void> {
   log.info("Model picker closed successfully.");
 }
 
+async function getVisibleComposerInput(page: Page) {
+  const candidates = selectors.mainPromptInput(page);
+  const count = await candidates.count();
+
+  for (let i = 0; i < count; i++) {
+    const candidate = candidates.nth(i);
+    if (await candidate.isVisible().catch(() => false)) {
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    "Could not find the visible UXPilot main composer input (textarea/contenteditable)."
+  );
+}
+
+async function readComposerContent(locator: ReturnType<Page["locator"]>): Promise<string> {
+  return locator
+    .evaluate((element) => {
+      const node = element as HTMLElement & { value?: string };
+      if (typeof node.value === "string") return node.value;
+      return node.innerText || node.textContent || "";
+    })
+    .catch(() => "");
+}
+
+function normalizeComposerText(value: string): string {
+  return value.replace(/\r\n/g, "\n").replace(/\u00a0/g, " ").trim();
+}
+
+async function setClipboardText(page: Page, value: string): Promise<boolean> {
+  try {
+    const origin = new URL(page.url()).origin;
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+      origin,
+    });
+  } catch {
+    // Permission grant is best-effort; clipboard APIs may still work in the browser.
+  }
+
+  try {
+    return await page.evaluate(async (text) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        return false;
+      }
+    }, value);
+  } catch {
+    return false;
+  }
+}
+
+async function pasteIntoComposer(
+  page: Page,
+  locator: ReturnType<Page["locator"]>,
+  context: string
+): Promise<void> {
+  await locator.click({ position: { x: 40, y: 25 } });
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => undefined);
+  await page.keyboard.press("Backspace").catch(() => undefined);
+
+  const clipboardReady = await setClipboardText(page, context);
+  if (clipboardReady) {
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+V" : "Control+V");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+  }
+
+  if (normalizeComposerText(await readComposerContent(locator)) !== normalizeComposerText(context)) {
+    await page.keyboard.insertText(context);
+    await new Promise((resolve) => setTimeout(resolve, 900));
+  }
+}
+
 async function appendProjectContextToComposer(
   page: Page,
   row: ProjectRow
@@ -511,88 +588,71 @@ async function appendProjectContextToComposer(
     (window as unknown as { __xmagicProjectPromptContext?: string }).__xmagicProjectPromptContext = value;
   }, context);
 
-  // The model picker can remain visually open even after the model value has
-  // changed. Close it and verify the actual composer is exposed before filling.
   await closeModelPicker(page);
 
-  const prompt = selectors.mainPromptInput(page).first();
+  let prompt = await getVisibleComposerInput(page);
   await prompt.waitFor({ state: "visible", timeout: 10000 });
 
-  // UXPilot's composer is React-controlled and can occasionally ignore a
-  // normal Playwright fill() immediately after the model picker closes.
-  // Use a small, deterministic cascade and verify the actual DOM value before
-  // allowing the flow to continue.
-  const setNativeTextareaValue = async (): Promise<void> => {
-    await prompt.evaluate((element, value) => {
-      const textarea = element as HTMLTextAreaElement;
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLTextAreaElement.prototype,
-        "value"
-      )?.set;
-      setter?.call(textarea, value);
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-      textarea.dispatchEvent(new Event("change", { bubbles: true }));
-    }, context);
+  const contextMatches = async (): Promise<boolean> => {
+    const actual = normalizeComposerText(await readComposerContent(prompt));
+    const expected = normalizeComposerText(context);
+    return actual === expected || actual.includes(expected);
   };
 
-  const composerHasContext = async (): Promise<boolean> => {
-    try {
-      return (await prompt.inputValue()) === context;
-    } catch {
-      return false;
-    }
-  };
+  // First attempt: normal Playwright fill on the currently visible control.
+  await prompt.click({ position: { x: 40, y: 25 } });
+  await prompt.fill(context).catch(() => undefined);
 
-  await prompt.click();
-  await prompt.fill(context);
-
-  if (!(await composerHasContext())) {
-    log.warn("Composer fill() did not persist the full context. Retrying with native textarea value...");
-    await setNativeTextareaValue();
+  if (!(await contextMatches())) {
+    log.warn("Composer fill() did not persist the full context. Retrying with paste...");
+    await pasteIntoComposer(page, prompt, context);
   }
 
-  if (!(await composerHasContext())) {
-    log.warn("Native textarea update did not persist. Retrying with keyboard insertText...");
-    await prompt.click();
-    await page.keyboard.press("Control+A").catch(() => undefined);
-    await page.keyboard.press("Backspace").catch(() => undefined);
-    await page.keyboard.insertText(context);
+  if (!(await contextMatches())) {
+    log.warn("Composer paste did not persist. Reacquiring the visible composer and retrying...");
+    prompt = await getVisibleComposerInput(page);
+    await prompt.click({ position: { x: 40, y: 25 } });
+    await prompt.fill(context).catch(() => undefined);
   }
 
   await waitUntil(
-    composerHasContext,
+    async () => {
+      // UXPilot may replace the composer DOM node after it receives input.
+      prompt = await getVisibleComposerInput(page).catch(() => prompt);
+      return contextMatches();
+    },
     {
-      timeoutMs: 10000,
-      intervalMs: 150,
+      timeoutMs: 15000,
+      intervalMs: 250,
       label: "UXPilot main composer to contain project context",
     }
   );
 
   const sendButton = page
-    .locator('button:visible')
-    .filter({ hasText: /^(send|generate)$/i })
+    .getByRole("button", { name: /^(send|generate)$/i })
     .first();
 
   await waitUntil(
     async () => {
       try {
-        return await sendButton.isEnabled();
+        return (await sendButton.count()) > 0 &&
+          (await sendButton.isVisible()) &&
+          (await sendButton.isEnabled());
       } catch {
         return false;
       }
     },
     {
-      timeoutMs: 10000,
-      intervalMs: 150,
+      timeoutMs: 15000,
+      intervalMs: 200,
       label: "UXPilot send/generate button to become enabled",
     }
   );
 
   log.info(
-    `Project context added to the main UXPilot composer and verified (${context.length} chars).`
+    `Project context added to the UXPilot composer and verified (${context.length} chars).`
   );
 }
-
 async function dismissOptionalPopup(page: Page): Promise<void> {
   const maybeLater = selectors.maybeLaterButton(page).first();
   try {
