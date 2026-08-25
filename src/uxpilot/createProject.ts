@@ -454,33 +454,50 @@ async function closeModelPicker(page: Page): Promise<void> {
 
   log.info("Model picker is still open after Escape. Clicking outside the picker...");
 
-  // In the current UXPilot editor the picker is anchored over the composer.
-  // A click on the main editor heading is outside that overlay and reproduces
-  // the same close-on-outside-click behavior that worked in the original flow.
-  const designHeading = page
-    .getByRole("heading", { name: /what would you like to design\?/i })
-    .first();
+  // Never use locator.click() here. The editor canvas is backed by a tldraw
+  // hit-test layer that can intercept DOM locator clicks even when the target
+  // element is visible. A real viewport mouse click reproduces UXPilot's
+  // outside-click dismissal behavior reliably.
+  const viewport = page.viewportSize();
+  const width = viewport?.width ?? 1440;
+  const height = viewport?.height ?? 900;
 
-  if (await isVisible(designHeading)) {
-    await designHeading.click();
-  } else {
-    const viewport = page.viewportSize();
-    const x = Math.max(
-      40,
-      Math.min((viewport?.width ?? 1440) - 120, Math.floor((viewport?.width ?? 1440) * 0.72))
-    );
-    const y = Math.max(80, Math.floor((viewport?.height ?? 900) * 0.2));
+  // These points are intentionally outside the model picker and away from
+  // the composer controls. Try more than one point because responsive layout
+  // can shift the picker slightly between runs.
+  const outsidePoints: Array<[number, number]> = [
+    [Math.floor(width * 0.72), Math.floor(height * 0.22)],
+    [Math.floor(width * 0.82), Math.floor(height * 0.42)],
+    [Math.floor(width * 0.60), Math.floor(height * 0.18)],
+  ];
+
+  let closed = false;
+  for (const [x, y] of outsidePoints) {
+    if (!(await isVisible(slider))) {
+      closed = true;
+      break;
+    }
+
+    log.info(`Clicking outside model picker at (${x}, ${y})...`);
     await page.mouse.click(x, y);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+
+    if (!(await isVisible(slider))) {
+      closed = true;
+      break;
+    }
   }
 
-  await waitUntil(
-    async () => !(await isVisible(slider)),
-    {
-      timeoutMs: 5000,
-      intervalMs: 100,
-      label: "UXPilot model picker to close",
-    }
-  );
+  if (!closed) {
+    await waitUntil(
+      async () => !(await isVisible(slider)),
+      {
+        timeoutMs: 3000,
+        intervalMs: 100,
+        label: "UXPilot model picker to close",
+      }
+    );
+  }
 
   log.info("Model picker closed successfully.");
 }
@@ -500,21 +517,74 @@ async function appendProjectContextToComposer(
 
   const prompt = selectors.mainPromptInput(page).first();
   await prompt.waitFor({ state: "visible", timeout: 10000 });
+
+  // UXPilot's composer is React-controlled and can occasionally ignore a
+  // normal Playwright fill() immediately after the model picker closes.
+  // Use a small, deterministic cascade and verify the actual DOM value before
+  // allowing the flow to continue.
+  const setNativeTextareaValue = async (): Promise<void> => {
+    await prompt.evaluate((element, value) => {
+      const textarea = element as HTMLTextAreaElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value"
+      )?.set;
+      setter?.call(textarea, value);
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    }, context);
+  };
+
+  const composerHasContext = async (): Promise<boolean> => {
+    try {
+      return (await prompt.inputValue()) === context;
+    } catch {
+      return false;
+    }
+  };
+
   await prompt.click();
   await prompt.fill(context);
+
+  if (!(await composerHasContext())) {
+    log.warn("Composer fill() did not persist the full context. Retrying with native textarea value...");
+    await setNativeTextareaValue();
+  }
+
+  if (!(await composerHasContext())) {
+    log.warn("Native textarea update did not persist. Retrying with keyboard insertText...");
+    await prompt.click();
+    await page.keyboard.press("Control+A").catch(() => undefined);
+    await page.keyboard.press("Backspace").catch(() => undefined);
+    await page.keyboard.insertText(context);
+  }
+
+  await waitUntil(
+    composerHasContext,
+    {
+      timeoutMs: 10000,
+      intervalMs: 150,
+      label: "UXPilot main composer to contain project context",
+    }
+  );
+
+  const sendButton = page
+    .locator('button:visible')
+    .filter({ hasText: /^(send|generate)$/i })
+    .first();
 
   await waitUntil(
     async () => {
       try {
-        return (await prompt.inputValue()) === context;
+        return await sendButton.isEnabled();
       } catch {
         return false;
       }
     },
     {
-      timeoutMs: 5000,
-      intervalMs: 100,
-      label: "UXPilot main composer to contain project context",
+      timeoutMs: 10000,
+      intervalMs: 150,
+      label: "UXPilot send/generate button to become enabled",
     }
   );
 
