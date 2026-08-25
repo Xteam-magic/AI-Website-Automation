@@ -163,7 +163,7 @@ export async function runPage(
     designSystem: row.designSystem,
     fullProjectDoc: row.fullProjectDoc,
     pageName: pageSpec.page,
-    pageDescription: pageSpec.description,
+    pageDescription: pageSpec.prompt?.trim() || pageSpec.description,
     pageIndex,
     totalPages,
     edits: editsText,
