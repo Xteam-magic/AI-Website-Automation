@@ -97,10 +97,177 @@ function formatField(value: unknown): string {
   }
 }
 
+function normalizeHeader(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function readRawColumn(row: ProjectRow, aliases: string[]): string {
+  const rawColumns = (row as FlexibleProjectRow).rawColumns;
+  if (!rawColumns || typeof rawColumns !== "object") return "";
+
+  const wanted = aliases.map(normalizeHeader);
+  for (const [header, value] of Object.entries(rawColumns)) {
+    if (wanted.includes(normalizeHeader(header))) {
+      return formatField(value);
+    }
+  }
+  return "";
+}
+
+/**
+ * Some live-sheet columns are intentionally not part of the fixed ProjectRow
+ * interface. Include only additional fields that can materially improve UI/UX
+ * generation, while excluding credentials, operational state, billing and
+ * workflow-control columns from the UXPilot prompt.
+ */
+function collectAdditionalDesignContext(row: ProjectRow): Array<[string, string]> {
+  const rawColumns = (row as FlexibleProjectRow).rawColumns;
+  if (!rawColumns || typeof rawColumns !== "object") return [];
+
+  const knownHeaders = new Set(
+    [
+      "Project ID",
+      "Status",
+      "Project Name",
+      "Required Project Level",
+      "User ID",
+      "User Name",
+      "User Phone",
+      "User Email",
+      "Full Project Doc",
+      "Design System",
+      "Brand Description",
+      "Color Palette",
+      "Static Content",
+      "Pages",
+      "Count Page",
+      "Fonts",
+      "Language",
+      "Source Links",
+      "Source Images",
+      "Logo URL",
+      "Figma Needed",
+      "Mobile Version",
+      "Client Dev Method",
+      "Deadline",
+      "AI Suggestions",
+      "User Suggestions",
+      "Design URL",
+      "HTML File",
+      "JSON File",
+      "Edits After Design",
+      "Payment Status",
+      "User Rate",
+      "Project Cost",
+      "UX Pilot Account",
+      "CONV Elementor Account",
+      "AI Token Account",
+      "AI Engine Note",
+      "Current Step",
+      "Current Page",
+      "Last Run Time",
+      "Last Finished Time",
+      "Run ID",
+      "Retry Count",
+      "Last Error",
+      "Full Logs",
+      "Full UXPilot Project Prompt",
+    ].map(normalizeHeader),
+  );
+
+  const excludedTokens = [
+    "password",
+    "secret",
+    "token",
+    "account",
+    "credential",
+    "api key",
+    "email",
+    "phone",
+    "user id",
+    "payment",
+    "cost",
+    "rate",
+    "status",
+    "current step",
+    "current page",
+    "last run",
+    "last finished",
+    "run id",
+    "retry",
+    "error",
+    "full logs",
+    "design url",
+    "html file",
+    "json file",
+    "edit after design",
+  ];
+
+  const designTokens = [
+    "content",
+    "copy",
+    "text",
+    "description",
+    "requirement",
+    "goal",
+    "objective",
+    "audience",
+    "persona",
+    "feature",
+    "function",
+    "cta",
+    "tone",
+    "voice",
+    "style",
+    "visual",
+    "layout",
+    "navigation",
+    "menu",
+    "brand",
+    "design",
+    "color",
+    "font",
+    "language",
+    "reference",
+    "inspiration",
+    "competitor",
+    "asset",
+    "image",
+    "icon",
+    "logo",
+    "mobile",
+    "responsive",
+    "accessibility",
+    "seo",
+    "static",
+    "content strategy",
+    "section",
+    "page",
+  ];
+
+  const results: Array<[string, string]> = [];
+  for (const [header, rawValue] of Object.entries(rawColumns)) {
+    const normalized = normalizeHeader(header);
+    if (!normalized || knownHeaders.has(normalized)) continue;
+    if (excludedTokens.some((token) => normalized.includes(token))) continue;
+    if (!designTokens.some((token) => normalized.includes(token))) continue;
+
+    const value = formatField(rawValue);
+    if (!value) continue;
+    results.push([header.toUpperCase(), value]);
+  }
+
+  return results;
+}
+
 /**
  * Builds the project-wide context required in the final generation prompt.
- * The Sheet specification contains Full Project Doc, Fonts, Language, Pages,
- * AI Suggestions and User Suggestions as project fields.
+ * All project information that can improve visual/design accuracy is preserved,
+ * including Static Content and additional live-sheet design/content columns.
  */
 export function buildProjectPromptContext(row: ProjectRow): string {
   const fullProjectDoc = formatField(
@@ -115,18 +282,30 @@ export function buildProjectPromptContext(row: ProjectRow): string {
   const userSuggestions = formatField(
     readField(row, ["userSuggestions", "userSuggestion", "User Suggestions", "User Suggestion", "user_suggestions"])
   );
+  const staticContent = readRawColumn(row, [
+    "Static Content",
+    "Static content",
+    "staticContent",
+    "static_content",
+  ]);
+  const sourceImages = formatField(readField(row, ["sourceImages", "Source Images"]));
+  const logoUrl = formatField(readField(row, ["logoUrl", "Logo URL"]));
+  const additionalDesignContext = collectAdditionalDesignContext(row);
 
-  const structuredFields = [
+  const structuredFields: Array<[string, string]> = [
     ["PROJECT NAME", formatField(readField(row, ["projectName", "Project Name"]))],
     ["FULL PROJECT DOC", fullProjectDoc],
     ["DESIGN SYSTEM", formatField(readField(row, ["designSystem", "Design System"]))],
     ["BRAND DESCRIPTION", formatField(readField(row, ["brandDescription", "Brand Description"]))],
+    ["STATIC CONTENT", staticContent],
     ["COLOR PALETTE", formatField(readField(row, ["colorPalette", "Color Palette"]))],
     ["PAGES", pages],
     ["COUNT PAGE", formatField(readField(row, ["countPage", "Count Page"]))],
     ["FONTS", fonts],
     ["LANGUAGE", language],
     ["SOURCE LINKS", formatField(readField(row, ["sourceLinks", "Source Links"]))],
+    ["SOURCE IMAGES", sourceImages],
+    ["LOGO URL", logoUrl],
     ["MOBILE VERSION", formatField(readField(row, ["mobileVersion", "Mobile Version"]))],
     ["FIGMA NEEDED", formatField(readField(row, ["figmaNeeded", "Figma Needed"]))],
     ["CLIENT DEV METHOD", formatField(readField(row, ["clientDevMethod", "Client Dev Method"]))],
@@ -135,6 +314,8 @@ export function buildProjectPromptContext(row: ProjectRow): string {
     ["AI SUGGESTIONS", aiSuggestions],
     ["USER SUGGESTIONS", userSuggestions],
   ];
+
+  structuredFields.push(...additionalDesignContext);
 
   return [
     "PROJECT CONTEXT",
@@ -273,33 +454,48 @@ async function closeModelPicker(page: Page): Promise<void> {
 
   log.info("Model picker is still open after Escape. Clicking outside the picker...");
 
-  // In the current UXPilot editor the picker is anchored over the composer.
-  // A click on the main editor heading is outside that overlay and reproduces
-  // the same close-on-outside-click behavior that worked in the original flow.
-  const designHeading = page
-    .getByRole("heading", { name: /what would you like to design\?/i })
-    .first();
+  // Do not use locator.click() for the outside click. The UXPilot canvas
+  // intercepts locator clicks on otherwise-visible elements (for example the
+  // "What would you like to design?" heading), which caused a 30s timeout.
+  // Use real viewport mouse clicks at safe points outside the picker instead.
+  // The first point is intentionally in the open canvas area; the second point
+  // is a fallback on the opposite side if UXPilot did not dismiss the picker.
+  const viewport = page.viewportSize();
+  const width = viewport?.width ?? 1440;
+  const height = viewport?.height ?? 900;
 
-  if (await isVisible(designHeading)) {
-    await designHeading.click();
-  } else {
-    const viewport = page.viewportSize();
-    const x = Math.max(
-      40,
-      Math.min((viewport?.width ?? 1440) - 120, Math.floor((viewport?.width ?? 1440) * 0.72))
-    );
-    const y = Math.max(80, Math.floor((viewport?.height ?? 900) * 0.2));
+  const outsidePoints: Array<[number, number]> = [
+    [Math.floor(width * 0.72), Math.floor(height * 0.22)],
+    [Math.floor(width * 0.82), Math.floor(height * 0.42)],
+  ];
+
+  let closed = false;
+  for (const [x, y] of outsidePoints) {
+    if (!(await isVisible(slider))) {
+      closed = true;
+      break;
+    }
+
+    log.info(`Clicking outside model picker at (${x}, ${y})...`);
     await page.mouse.click(x, y);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    if (!(await isVisible(slider))) {
+      closed = true;
+      break;
+    }
   }
 
-  await waitUntil(
-    async () => !(await isVisible(slider)),
-    {
-      timeoutMs: 5000,
-      intervalMs: 100,
-      label: "UXPilot model picker to close",
-    }
-  );
+  if (!closed) {
+    await waitUntil(
+      async () => !(await isVisible(slider)),
+      {
+        timeoutMs: 3000,
+        intervalMs: 100,
+        label: "UXPilot model picker to close",
+      }
+    );
+  }
 
   log.info("Model picker closed successfully.");
 }
