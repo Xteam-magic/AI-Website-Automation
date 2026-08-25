@@ -42,14 +42,22 @@ jobs:
       - name: Run Automation
         id: automation
         env:
+          UXPILOT_SHARED_PASSWORD: ${{ secrets.UXPILOT_SHARED_PASSWORD }}
           UX_EMAIL: ${{ secrets.UX_EMAIL }}
           UX_PASSWORD: ${{ secrets.UX_PASSWORD }}
+          ELEMENTOR_SHARED_PASSWORD: ${{ secrets.ELEMENTOR_SHARED_PASSWORD }}
+          ELEMENTOR_PASSWORD: ${{ secrets.ELEMENTOR_PASSWORD }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
           FIGMA_URL: ${{ secrets.FIGMA_URL }}
           ELEMENTOR_URL: ${{ secrets.ELEMENTOR_URL }}
+          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+          AI_PROVIDER: ${{ secrets.AI_PROVIDER }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+          AI_TEMPERATURE: ${{ secrets.AI_TEMPERATURE }}
+          AI_MAX_OUTPUT_TOKENS: ${{ secrets.AI_MAX_OUTPUT_TOKENS }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: npm run build && npm start
 
