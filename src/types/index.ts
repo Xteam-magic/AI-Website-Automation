@@ -55,6 +55,12 @@ export type ClientDevMethod = "Elementor" | "HTML" | string;
 export interface PageSpec {
   page: string;
   description: string;
+  /** Exact page prompt/content when the source is the JSON Pages document. */
+  prompt?: string;
+  /** Optional source ordering hint from the Pages document. */
+  priority?: number;
+  /** Optional workflow status from the Pages document. */
+  pageStatus?: string;
 }
 
 export interface EditSpec {
