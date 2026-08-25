@@ -29,13 +29,17 @@ npm start
 
 | متغیر | توضیح |
 | --- | --- |
-| `UX_EMAIL` / `UX_PASSWORD` | اعتبار ورود به UXPilot |
+| `UXPILOT_SHARED_PASSWORD` | پسورد ثابت همه اکانت‌های UXPilot؛ ایمیل از ستون `UX Pilot Account` خوانده می‌شود |
+| `ELEMENTOR_SHARED_PASSWORD` | پسورد ثابت همه اکانت‌های converter؛ ایمیل از ستون `CONV Elementor Account` خوانده می‌شود |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | JSON کامل Service Account گوگل (یک‌خطی)، با دسترسی Edit روی شیت |
 | `GOOGLE_SHEET_ID` | شناسه Google Sheet |
-| `GMAIL_EMAIL` / `GMAIL_APP_PASSWORD` | ارسال ایمیل از طریق SMTP (Gmail App Password، نه رمز اصلی حساب) |
+| `RESEND_API_KEY` | کلید ارسال ایمیل از طریق سرویس Resend |
 | `ADMIN_EMAIL` | گیرنده ثابت همه ایمیل‌ها (پیش‌فرض `emad_1382@yahoo.com`) |
 | `FIGMA_URL` | لینک فایل Figma مقصد |
 | `ELEMENTOR_URL` | لینک ابزار Web2Elementor |
+| `AI_BASE_URL` | fallback برای API فاز دوم؛ پیش‌فرض `https://api.gapgpt.app/v1` |
+| `AI_PROVIDER` | `openai-compatible` یا `anthropic` |
+| `AI_MODEL` | مدل fallback فاز دوم |
 
 ## ساختار Repository
 
@@ -55,6 +59,7 @@ AI-Website-Automation/
 │   ├── elementor/convert.ts            # HTML -> JSON + دانلود
 │   ├── gmail/mail.ts                    # تنها منبع ارسال ایمیل (۵ نقطه)
 │   ├── prompts/buildPrompt.ts            # تنها منبع ساخت Prompt
+│   ├── ai/                               # Phase 2 AI client + prompt + tool executor + agent loop
 │   ├── runner/
 │   │     ├── pageRunner.ts                # پایپ‌لاین یک صفحه
 │   │     └── projectRunner.ts              # مدیریت کل پروژه (start/edit/resume)
@@ -68,11 +73,14 @@ AI-Website-Automation/
 
 - **مدل Scheduler:** هر اجرای GitHub Action دقیقاً **یک پروژه** را پردازش می‌کند و بعد از اتمام خارج می‌شود (`exit 0` موفق/بدون‌کار، `exit 1` خطا)؛ پروژه بعدی با اجرای ساعت بعد Cron شروع می‌شود.
 - **اولویت انتخاب پروژه در هر اجرا:** `Running` (Resume) → `Completed` با `Edits After Design` پر → اولین `Start`.
-- **ارسال ایمیل:** SMTP با Nodemailer و Gmail App Password (نه Gmail API/OAuth2).
+- **ارسال ایمیل:** سرویس فعلی Resend، مطابق پیاده‌سازی موجود در `src/gmail/mail.ts`.
 - **ذخیره خروجی:** HTML و JSON روی دیسک در `downloads/ProjectID/Page/` ذخیره می‌شوند؛ مسیر نسبی فایل در ستون‌های `HTML File` و `JSON File` شیت نوشته می‌شود (نه خودِ محتوا).
 - **Resume:** صفحات قبل از `Current Page` تمام‌شده فرض می‌شوند و رد می‌شوند؛ صفحهٔ در حال انجام (و بقیه صفحات بعدش) از ابتدای پایپ‌لاین صفحه دوباره اجرا می‌شود — بازتولید یک صفحهٔ نیمه‌کاره بی‌خطر است (فقط خروجی همان صفحه را دوباره می‌نویسد) و نیاز به بازسازی وضعیت ریزدانه‌تر (وسط Paste فیگما، وسط Convert المنتور) را که با Crash از بین می‌رود، دور می‌زند.
 - **Status Enum:** فقط مقادیر enum نهایی `docs/06_Sheet_Structure.txt` استفاده می‌شود؛ جزئیاتی مثل شکست Mobile در `Current Step` / ایمیل ثبت می‌شود، نه در ستون `Status`.
-- **Login:** همیشه برای هر پروژه انجام می‌شود (مستقل از `Figma Needed`)؛ شرط `Figma Needed` فقط روی مرحلهٔ Copy to Figma / Paste اعمال می‌شود.
+- **Login:** ایمیل UXPilot از `UX Pilot Account` همان ردیف می‌آید و password ثابت از GitHub Actions خوانده می‌شود؛ `Figma Needed` فقط روی مرحلهٔ Copy to Figma / Paste اثر دارد.
+- **Implementation:** فقط وقتی `Implementation = Yes` است مرحلهٔ converter/implementation اجرا می‌شود؛ خود طراحی و HTML export مستقل از این فلگ باقی می‌ماند.
+- **Phase 2 AI:** بعد از پایان تمام صفحات Phase 1 اجرا می‌شود. مدل کل ردیف live sheet را می‌خواند و GitHub Actions فقط ابزارهای تصمیم‌گرفته‌شده توسط مدل را اجرا می‌کند.
+- **Drive content:** لینک‌های Google Drive برای ستون‌های محتوایی قبل از generation در تب جدید باز و محتوای کاملشان خوانده می‌شود.
 
 ## محدودیت‌های شناخته‌شده (قبل از اولین اجرای واقعی بخوان)
 
