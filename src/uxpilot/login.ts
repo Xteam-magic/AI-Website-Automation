@@ -37,12 +37,16 @@ export async function isLoggedIn(page: Page): Promise<boolean> {
   return (await selectors.loggedInIndicator(page).count()) > 0;
 }
 
-async function attemptLogin(page: Page): Promise<void> {
+async function attemptLogin(page: Page, email: string): Promise<void> {
   log.info("Navigating to login page...");
   await page.goto(config.urls.uxpilotLogin, { waitUntil: "domcontentloaded" });
 
-  await selectors.emailInput(page).first().fill(config.secrets.uxEmail);
-  await selectors.passwordInput(page).first().fill(config.secrets.uxPassword);
+  const account = email.trim();
+  if (!account) throw new Error("UX Pilot account email is empty. Set the UX Pilot Account column for this project.");
+  if (!config.secrets.uxSharedPassword) throw new Error("UXPilot shared password is not configured in GitHub Actions.");
+
+  await selectors.emailInput(page).first().fill(account);
+  await selectors.passwordInput(page).first().fill(config.secrets.uxSharedPassword);
   await selectors.submitButton(page).first().click();
 
   await waitUntil(
@@ -59,8 +63,9 @@ async function attemptLogin(page: Page): Promise<void> {
 }
 
 /** Logs into UXPilot, retrying per config.retries.login (3 additional attempts = 4 total). */
-export async function login(page: Page): Promise<void> {
-  await retry(() => attemptLogin(page), { retries: config.retries.login, label: "UXPilot Login" });
+export async function login(page: Page, accountEmail: string): Promise<void> {
+  const email = accountEmail.trim();
+  await retry(() => attemptLogin(page, email), { retries: config.retries.login, label: "UXPilot Login" });
 }
 
 /**
@@ -69,10 +74,10 @@ export async function login(page: Page): Promise<void> {
  * step, re-login once if needed" rule — it does not blindly log in every
  * time, since a fresh login on every step would be unnecessary and slow.
  */
-export async function ensureLoggedIn(page: Page): Promise<void> {
+export async function ensureLoggedIn(page: Page, accountEmail: string): Promise<void> {
   if (await isLoggedIn(page)) {
     return;
   }
   log.warn("Session appears expired or missing. Re-authenticating...");
-  await login(page);
+  await login(page, accountEmail);
 }
