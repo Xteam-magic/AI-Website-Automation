@@ -454,48 +454,33 @@ async function closeModelPicker(page: Page): Promise<void> {
 
   log.info("Model picker is still open after Escape. Clicking outside the picker...");
 
-  // Do not use locator.click() for the outside click. The UXPilot canvas
-  // intercepts locator clicks on otherwise-visible elements (for example the
-  // "What would you like to design?" heading), which caused a 30s timeout.
-  // Use real viewport mouse clicks at safe points outside the picker instead.
-  // The first point is intentionally in the open canvas area; the second point
-  // is a fallback on the opposite side if UXPilot did not dismiss the picker.
-  const viewport = page.viewportSize();
-  const width = viewport?.width ?? 1440;
-  const height = viewport?.height ?? 900;
+  // In the current UXPilot editor the picker is anchored over the composer.
+  // A click on the main editor heading is outside that overlay and reproduces
+  // the same close-on-outside-click behavior that worked in the original flow.
+  const designHeading = page
+    .getByRole("heading", { name: /what would you like to design\?/i })
+    .first();
 
-  const outsidePoints: Array<[number, number]> = [
-    [Math.floor(width * 0.72), Math.floor(height * 0.22)],
-    [Math.floor(width * 0.82), Math.floor(height * 0.42)],
-  ];
-
-  let closed = false;
-  for (const [x, y] of outsidePoints) {
-    if (!(await isVisible(slider))) {
-      closed = true;
-      break;
-    }
-
-    log.info(`Clicking outside model picker at (${x}, ${y})...`);
-    await page.mouse.click(x, y);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
-    if (!(await isVisible(slider))) {
-      closed = true;
-      break;
-    }
-  }
-
-  if (!closed) {
-    await waitUntil(
-      async () => !(await isVisible(slider)),
-      {
-        timeoutMs: 3000,
-        intervalMs: 100,
-        label: "UXPilot model picker to close",
-      }
+  if (await isVisible(designHeading)) {
+    await designHeading.click();
+  } else {
+    const viewport = page.viewportSize();
+    const x = Math.max(
+      40,
+      Math.min((viewport?.width ?? 1440) - 120, Math.floor((viewport?.width ?? 1440) * 0.72))
     );
+    const y = Math.max(80, Math.floor((viewport?.height ?? 900) * 0.2));
+    await page.mouse.click(x, y);
   }
+
+  await waitUntil(
+    async () => !(await isVisible(slider)),
+    {
+      timeoutMs: 5000,
+      intervalMs: 100,
+      label: "UXPilot model picker to close",
+    }
+  );
 
   log.info("Model picker closed successfully.");
 }
