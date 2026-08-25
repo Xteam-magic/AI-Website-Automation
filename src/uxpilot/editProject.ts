@@ -22,6 +22,41 @@ const selectors = {
  * and opens it. Used for the "Edits After Design" flow, where the project
  * already exists and only needs a specific page re-generated.
  */
+
+export async function tryOpenExistingProject(page: Page, projectName: string): Promise<boolean> {
+  log.info(`Checking whether UXPilot project "${projectName}" already exists...`);
+  await page.goto(config.urls.uxpilotDashboard, { waitUntil: "domcontentloaded" });
+
+  const searchInput = selectors.projectSearchInput(page);
+  if ((await searchInput.count()) > 0) {
+    await searchInput.first().fill(projectName);
+    await page.waitForTimeout(750);
+  }
+
+  const card = selectors.projectCard(page, projectName).first();
+  if ((await card.count()) === 0) {
+    log.info(`No existing UXPilot project named "${projectName}" was found.`);
+    return false;
+  }
+
+  try {
+    await card.click();
+    await waitUntil(async () => (await selectors.editorReadyIndicator(page).count()) > 0, {
+      timeoutMs: config.timeouts.createProjectMs,
+      label: `existing UXPilot project "${projectName}" to open`,
+    });
+    log.info(`Existing UXPilot project "${projectName}" opened.`);
+    return true;
+  } catch (err) {
+    log.warn(
+      `A project card named "${projectName}" was present but could not be opened. Creating a fresh project is safer. ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    );
+    return false;
+  }
+}
+
 export async function openExistingProject(page: Page, projectName: string): Promise<void> {
   log.info(`Opening existing project "${projectName}"...`);
 
