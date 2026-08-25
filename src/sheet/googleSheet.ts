@@ -12,17 +12,11 @@ import {
   ProjectRowUpdate,
   ProjectStatus,
   YesNo,
+  SheetColumnUpdate,
 } from "../types";
 
 const log = logger.scope("GoogleSheet");
 
-/**
- * Maps a Google Sheet header (exact text, per docs/06_Sheet_Structure.txt) to
- * the ProjectRow field it fills. Reading and writing both go through this
- * map, so columns are always matched by header text, never by fixed
- * position — the live sheet's column order does not need to match this
- * list. If a header is renamed in the sheet, only this map needs editing.
- */
 const HEADER_MAP: Record<string, keyof ProjectRow> = {
   "Project ID": "projectId",
   Status: "status",
@@ -46,6 +40,7 @@ const HEADER_MAP: Record<string, keyof ProjectRow> = {
   "Figma Needed": "figmaNeeded",
   "Mobile Version": "mobileVersion",
   "Client Dev Method": "clientDevMethod",
+  Implementation: "implementation",
   Deadline: "deadline",
   "Project Cost": "projectCost",
   "AI Suggestions": "aiSuggestions",
@@ -55,6 +50,10 @@ const HEADER_MAP: Record<string, keyof ProjectRow> = {
   "Design URL": "designUrl",
   "HTML File": "htmlFile",
   "JSON File": "jsonFile",
+  "UX Pilot Account": "uxPilotAccount",
+  "CONV Elementor Account": "convElementorAccount",
+  "AI Token Account": "aiTokenAccount",
+  "AI Engine Note": "aiEngineNote",
   "Edits After Design": "editsAfterDesign",
   "Current Step": "currentStep",
   "Current Page": "currentPage",
@@ -67,7 +66,8 @@ const HEADER_MAP: Record<string, keyof ProjectRow> = {
   "Full ux pilio project prompt": "fullUxPilotProjectPrompt",
 };
 
-/** Converts a 0-based column index into its A1 letter (0 -> A, 26 -> AA, ...). */
+const READ_RANGE = "A1:ZZZ";
+
 function columnLetter(index: number): string {
   let letter = "";
   let n = index;
@@ -78,27 +78,17 @@ function columnLetter(index: number): string {
   return letter;
 }
 
-/**
- * Strict JSON parsing for the Pages / Edits After Design columns, per
- * project decision: if the cell is non-empty but not valid JSON, this is
- * treated as a data error and throws rather than guessing at the content.
- * An empty cell is valid and means "no items" (e.g. no pending edits).
- */
 function parseJsonColumn<T>(raw: string, columnName: string, rowNumber: number): T[] {
   const trimmed = (raw ?? "").trim();
-  if (trimmed.length === 0) {
-    return [];
-  }
+  if (!trimmed) return [];
   try {
     const parsed = JSON.parse(trimmed);
-    if (!Array.isArray(parsed)) {
-      throw new Error("expected a JSON array");
-    }
+    if (!Array.isArray(parsed)) throw new Error("expected a JSON array");
     return parsed as T[];
   } catch (err) {
     throw new Error(
       `Row ${rowNumber}: column "${columnName}" is not valid JSON (${(err as Error).message}). ` +
-        `Fix the cell content in the Google Sheet — this project cannot be safely processed as-is.`
+      "Fix the cell content in the Google Sheet before this project can continue safely."
     );
   }
 }
@@ -112,17 +102,24 @@ function parseNumber(raw: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
-/**
- * Source Images is documented only as "لینک تصاویر مرجع" with no specified
- * delimiter. This assumes one URL per line, or comma-separated — whichever
- * the sheet actually uses. Adjust this one function if the live sheet uses
- * a different separator.
- */
 function parseSourceImages(raw: string): string[] {
   return (raw ?? "")
     .split(/\r?\n|,/)
     .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+    .filter(Boolean);
+}
+
+function normalizeHeader(header: string): string {
+  return header.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function getByAliases(byHeader: Record<string, string>, aliases: string[]): string {
+  const normalized = new Map(Object.entries(byHeader).map(([k, v]) => [normalizeHeader(k), v]));
+  for (const alias of aliases) {
+    const value = normalized.get(normalizeHeader(alias));
+    if (value !== undefined && String(value).trim() !== "") return String(value);
+  }
+  return "";
 }
 
 export class GoogleSheetService {
@@ -131,9 +128,7 @@ export class GoogleSheetService {
   private headers: string[] = [];
 
   private async getApi(): Promise<sheets_v4.Sheets> {
-    if (this.sheetsApi) {
-      return this.sheetsApi;
-    }
+    if (this.sheetsApi) return this.sheetsApi;
     const credentials = JSON.parse(config.secrets.googleServiceAccountJson);
     const auth = new google.auth.GoogleAuth({
       credentials,
@@ -143,22 +138,16 @@ export class GoogleSheetService {
     return this.sheetsApi;
   }
 
-  /** The Sheet ID's URL only pins a gid (tab), not a name, so the first tab's title is read dynamically. */
   private async getSheetTitle(): Promise<string> {
-    if (this.sheetTitle) {
-      return this.sheetTitle;
-    }
+    if (this.sheetTitle) return this.sheetTitle;
     const api = await this.getApi();
     const meta = await api.spreadsheets.get({ spreadsheetId: config.secrets.googleSheetId });
     const firstSheet = meta.data.sheets?.[0]?.properties?.title;
-    if (!firstSheet) {
-      throw new Error("Could not determine the first sheet/tab name from the spreadsheet.");
-    }
+    if (!firstSheet) throw new Error("Could not determine the first sheet/tab name.");
     this.sheetTitle = firstSheet;
     return firstSheet;
   }
 
-  /** Reads every project row from the sheet, fully parsed and typed. */
   async getAllRows(): Promise<ProjectRow[]> {
     return retry(() => this.fetchAllRows(), {
       retries: config.retries.googleSheet,
@@ -169,14 +158,13 @@ export class GoogleSheetService {
   private async fetchAllRows(): Promise<ProjectRow[]> {
     const api = await this.getApi();
     const title = await this.getSheetTitle();
-
     const response = await api.spreadsheets.values.get({
       spreadsheetId: config.secrets.googleSheetId,
-      range: `${title}!A1:AZ`,
+      range: `${title}!${READ_RANGE}`,
     });
 
     const values = response.data.values ?? [];
-    if (values.length === 0) {
+    if (!values.length) {
       log.warn("Sheet is empty (no header row found).");
       return [];
     }
@@ -187,15 +175,13 @@ export class GoogleSheetService {
 
     dataRows.forEach((rawRow, i) => {
       const rowNumber = i + 2;
-      if (rawRow.every((cell) => String(cell ?? "").trim().length === 0)) {
-        return;
-      }
+      if (rawRow.every((cell) => String(cell ?? "").trim() === "")) return;
 
       const byHeader: Record<string, string> = {};
       this.headers.forEach((header, colIndex) => {
         byHeader[header] = String(rawRow[colIndex] ?? "");
       });
-      const get = (header: string): string => byHeader[header] ?? "";
+      const get = (header: string) => byHeader[header] ?? "";
 
       const row: ProjectRow = {
         rowNumber,
@@ -221,6 +207,9 @@ export class GoogleSheetService {
         figmaNeeded: parseYesNo(get("Figma Needed")),
         mobileVersion: parseYesNo(get("Mobile Version")),
         clientDevMethod: (get("Client Dev Method").trim() || "HTML") as ClientDevMethod,
+        implementation: parseYesNo(
+          getByAliases(byHeader, ["Implementation", "Implement", "Implementation Needed"])
+        ),
         deadline: get("Deadline"),
         projectCost: get("Project Cost"),
         aiSuggestions: get("AI Suggestions"),
@@ -230,6 +219,10 @@ export class GoogleSheetService {
         designUrl: get("Design URL"),
         htmlFile: get("HTML File"),
         jsonFile: get("JSON File"),
+        uxPilotAccount: getByAliases(byHeader, ["UX Pilot Account", "UXPilot Account"]),
+        convElementorAccount: getByAliases(byHeader, ["CONV Elementor Account", "Elementor Account"]),
+        aiTokenAccount: getByAliases(byHeader, ["AI Token Account", "AI API Key"]),
+        aiEngineNote: getByAliases(byHeader, ["AI Engine Note", "AI Note"]),
         editsAfterDesign: parseJsonColumn<EditSpec>(get("Edits After Design"), "Edits After Design", rowNumber),
         currentStep: (get("Current Step").trim() || "Idle") as CurrentStep,
         currentPage: get("Current Page"),
@@ -240,12 +233,11 @@ export class GoogleSheetService {
         lastError: get("Last Error"),
         fullLogs: get("Full Logs"),
         fullUxPilotProjectPrompt: get("Full ux pilio project prompt"),
+        rawColumns: { ...byHeader },
+        headers: [...this.headers],
       };
 
-      if (row.countPage === 0 && row.pages.length > 0) {
-        row.countPage = row.pages.length;
-      }
-
+      if (row.countPage === 0 && row.pages.length > 0) row.countPage = row.pages.length;
       projectRows.push(row);
     });
 
@@ -253,10 +245,10 @@ export class GoogleSheetService {
   }
 
   selectNextRow(rows: ProjectRow[]): { row: ProjectRow; mode: "resume" | "edit" | "start" } | null {
-    const running = rows.find((r) => r.status === "Running");
-    if (running) {
-      log.info(`Resuming interrupted project: ${running.projectName} (row ${running.rowNumber})`);
-      return { row: running, mode: "resume" };
+    const resumable = rows.find((r) => r.status === "Running" || r.status === "AI Running");
+    if (resumable) {
+      log.info(`Resuming interrupted project: ${resumable.projectName} (row ${resumable.rowNumber})`);
+      return { row: resumable, mode: "resume" };
     }
 
     const needsEdit = rows.find((r) => r.status === "Completed" && r.editsAfterDesign.length > 0);
@@ -274,59 +266,65 @@ export class GoogleSheetService {
     return null;
   }
 
-  /** Writes only the given fields back to their exact columns on the given row. */
   async updateRow(rowNumber: number, update: ProjectRowUpdate): Promise<void> {
-    await retry(() => this.applyUpdate(rowNumber, update), {
+    const entries: SheetColumnUpdate[] = [];
+    for (const [field, value] of Object.entries(update)) {
+      const header = Object.entries(HEADER_MAP).find(([, mapped]) => mapped === field)?.[0];
+      if (!header) continue;
+      entries.push({ header, value: this.serializeKnownField(field as keyof ProjectRow, value) });
+    }
+    await this.updateColumns(rowNumber, entries);
+  }
+
+  async updateColumns(rowNumber: number, updates: SheetColumnUpdate[]): Promise<void> {
+    if (!updates.length) return;
+    await retry(() => this.applyColumnUpdates(rowNumber, updates), {
       retries: config.retries.googleSheet,
       label: `Google Sheet: update row ${rowNumber}`,
     });
   }
 
-  private async applyUpdate(rowNumber: number, update: ProjectRowUpdate): Promise<void> {
-    if (this.headers.length === 0) {
-      await this.fetchAllRows();
-    }
+  async updateColumnByHeader(rowNumber: number, header: string, value: string): Promise<void> {
+    await this.updateColumns(rowNumber, [{ header, value }]);
+  }
 
+  getColumn(row: ProjectRow, header: string): string {
+    return row.rawColumns[header] ?? "";
+  }
+
+  private serializeKnownField(field: keyof ProjectRow, value: unknown): string {
+    if (field === "editsAfterDesign") return JSON.stringify(value ?? []);
+    if (field === "pages") return JSON.stringify(value ?? []);
+    if (field === "sourceImages") return Array.isArray(value) ? value.join("\n") : String(value ?? "");
+    return value === undefined || value === null ? "" : String(value);
+  }
+
+  private async applyColumnUpdates(rowNumber: number, updates: SheetColumnUpdate[]): Promise<void> {
+    if (!this.headers.length) await this.fetchAllRows();
     const api = await this.getApi();
     const title = await this.getSheetTitle();
 
-    const reverseMap = new Map<keyof ProjectRow, string>();
-    for (const [header, field] of Object.entries(HEADER_MAP)) {
-      reverseMap.set(field, header);
-    }
-
-    const serialize = (field: keyof ProjectRow, value: unknown): string => {
-      if (field === "editsAfterDesign") {
-        return JSON.stringify(value ?? []);
-      }
-      return value === undefined || value === null ? "" : String(value);
-    };
-
     const data: sheets_v4.Schema$ValueRange[] = [];
-
-    for (const [field, value] of Object.entries(update) as [keyof ProjectRowUpdate, unknown][]) {
-      const header = reverseMap.get(field as keyof ProjectRow);
-      if (!header) {
-        continue;
-      }
-      const colIndex = this.headers.indexOf(header);
+    for (const { header, value } of updates) {
+      const normalizedTarget = normalizeHeader(header);
+      const colIndex = this.headers.findIndex((h) => normalizeHeader(h) === normalizedTarget);
       if (colIndex === -1) {
-        log.warn(`Column "${header}" not found in the live sheet header row — skipping this field.`);
+        log.warn(`Column "${header}" not found in the live sheet — skipping this field.`);
         continue;
       }
       data.push({
         range: `${title}!${columnLetter(colIndex)}${rowNumber}`,
-        values: [[serialize(field, value)]],
+        values: [[value]],
       });
     }
 
-    if (data.length === 0) {
-      return;
-    }
-
+    if (!data.length) return;
     await api.spreadsheets.values.batchUpdate({
       spreadsheetId: config.secrets.googleSheetId,
-      requestBody: { valueInputOption: "RAW", data },
+      requestBody: {
+        valueInputOption: "RAW",
+        data,
+      },
     });
   }
 }
