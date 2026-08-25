@@ -98,6 +98,19 @@ function buildHtmlPublicUrl(
   );
 }
 
+function buildJsonPublicUrl(
+  projectId: string,
+  pageName: string
+): string {
+  const encodedProjectId = encodeURIComponent(projectId);
+  const encodedPageName = encodeURIComponent(pageName);
+
+  return (
+    `https://xteam-magic.github.io/AI-Website-Automation/` +
+    `${encodedProjectId}/${encodedPageName}/${encodeURIComponent(pageName)}.json`
+  );
+}
+
 /**
  * Runs the full per-page pipeline: build prompt -> generate desktop
  * -> generate mobile (if requested) -> export HTML -> Figma (if requested)
@@ -321,7 +334,7 @@ export async function runPage(
 
   let jsonFilePath: string | undefined;
 
-  if (row.clientDevMethod === "Elementor") {
+  if (row.implementation === "Yes" && row.clientDevMethod.toLowerCase() === "elementor") {
     await googleSheetService.updateRow(
       row.rowNumber,
       {
@@ -336,19 +349,26 @@ export async function runPage(
           html,
           projectId: row.projectId,
           pageName: pageSpec.page,
+          accountEmail: row.convElementorAccount,
         }
       );
+
+    const jsonPublicUrl = buildJsonPublicUrl(row.projectId, pageSpec.page);
+    const jsonEntry = `${pageSpec.page}: ${jsonPublicUrl}`;
+    const existingJson = row.jsonFile?.trim() || "";
+    const jsonLines = existingJson
+      ? existingJson.split(/\r?\n/).filter((line) => !line.startsWith(`${pageSpec.page}: `))
+      : [];
+    const jsonValue = [...jsonLines, jsonEntry].join("\n");
 
     await googleSheetService.updateRow(
       row.rowNumber,
       {
         currentStep: "Download JSON",
-        jsonFile: path.relative(
-          config.paths.root,
-          jsonFilePath
-        ),
+        jsonFile: jsonValue,
       }
     );
+    row.jsonFile = jsonValue;
   }
 
   const isLastPage =
