@@ -4,6 +4,7 @@ import type { Page } from "playwright";
 import { config } from "../config/config";
 import { logger } from "../logger/logger";
 import { retry } from "../helpers/retry";
+import { waitUntil } from "../helpers/wait";
 import { ProjectLevel } from "../types";
 
 const log = logger.scope("UXPilot/Generate");
@@ -18,7 +19,7 @@ export class MobileGenerateError extends Error {
 const selectors = {
   promptInput: (page: Page) =>
     page.locator(
-      'textarea[placeholder="Describe your design, @ to reference images or documents"]'
+      'textarea[placeholder="Describe your design, @ to reference images or documents"], [contenteditable="true"][role="textbox"], [contenteditable="true"]'
     ),
 
   generateButton: (page: Page) =>
@@ -39,11 +40,15 @@ const selectors = {
     page.getByRole("button", { name: /copy\s*\/\s*export/i }),
 
   designSurface: (page: Page) =>
-    page
-      .locator(
-        '[data-testid*="canvas" i], [data-testid*="design-surface" i], [class*="design-surface" i], [class*="canvas" i]'
-      )
-      .first(),
+    page.locator(
+      '[data-testid*="design-surface" i], [class*="design-surface" i]'
+    ).first(),
+
+  generatedFrameLabels: (page: Page) =>
+    page.locator(".tl-frame-label:visible"),
+
+  generationStatusText: (page: Page) =>
+    page.getByText(/generating|thinking|creating|building/i).filter({ hasNotText: /what would you like to design/i }),
 
   generateMobileOption: (page: Page) =>
     page
@@ -88,7 +93,17 @@ async function getStoredProjectContext(page: Page): Promise<string> {
 }
 
 
-async function isGenerationFinished(page: Page): Promise<boolean> {
+async function getVisibleGeneratedFrameCount(page: Page): Promise<number> {
+  return selectors.generatedFrameLabels(page).count().catch(() => 0);
+}
+
+async function isGenerationFinished(
+  page: Page,
+  baselineFrameCount: number,
+  generationStarted: boolean
+): Promise<boolean> {
+  if (!generationStarted) return false;
+
   const stopVisible = await selectors
     .stopButton(page)
     .first()
@@ -96,7 +111,6 @@ async function isGenerationFinished(page: Page): Promise<boolean> {
     .catch(() => false);
 
   if (stopVisible) return false;
-
 
   const spinnerVisible = await selectors
     .spinner(page)
@@ -106,103 +120,141 @@ async function isGenerationFinished(page: Page): Promise<boolean> {
 
   if (spinnerVisible) return false;
 
+  const frameCount = await getVisibleGeneratedFrameCount(page);
+  if (frameCount > baselineFrameCount) return true;
 
   const previewVisible =
     (await selectors.previewFrame(page).count()) > 0 &&
-    (await selectors.previewFrame(page)
-      .first()
-      .isVisible()
-      .catch(() => false));
-
+    (await selectors.previewFrame(page).first().isVisible().catch(() => false));
 
   const exportVisible =
     (await selectors.copyExportControls(page).count()) > 0 &&
-    (await selectors.copyExportControls(page)
-      .first()
-      .isVisible()
-      .catch(() => false));
-
+    (await selectors.copyExportControls(page).first().isVisible().catch(() => false));
 
   const designVisible =
     (await selectors.designSurface(page).count()) > 0 &&
-    (await selectors.designSurface(page)
-      .first()
-      .isVisible()
-      .catch(() => false));
+    (await selectors.designSurface(page).first().isVisible().catch(() => false));
 
-
+  // A generic tldraw canvas exists even before generation. It is deliberately
+  // excluded from the completion signal above. Preview/export/real design
+  // surfaces are only considered after generation has demonstrably started.
   return previewVisible || exportVisible || designVisible;
 }
 
+async function waitForGenerationStart(
+  page: Page,
+  baselineFrameCount: number,
+  label: string
+): Promise<boolean> {
+  const startedAt = Date.now();
+  let lastLogAt = startedAt;
+
+  while (true) {
+    const stopVisible = await selectors.stopButton(page).first().isVisible().catch(() => false);
+    const spinnerVisible = await selectors.spinner(page).first().isVisible().catch(() => false);
+    const statusVisible = await selectors.generationStatusText(page).first().isVisible().catch(() => false);
+    const frameCount = await getVisibleGeneratedFrameCount(page);
+
+    if (stopVisible || spinnerVisible || statusVisible || frameCount > baselineFrameCount) {
+      log.info(`${label} generation visibly started.`);
+      return true;
+    }
+
+    const now = Date.now();
+    if (now - startedAt >= 30_000) {
+      // UXPilot can start generation without exposing a dedicated spinner.
+      // At this point we still wait for a real completion artifact instead of
+      // declaring success from the pre-existing tldraw canvas.
+      log.warn(`${label} has not exposed a generation indicator after 30s. Continuing to wait for a generated artifact.`);
+      return true;
+    }
+
+    if (now - lastLogAt >= 10_000) {
+      log.info(`${label} is waiting for generation to start...`);
+      lastLogAt = now;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+}
 
 /**
- * Waits indefinitely until UXPilot has genuinely finished generating.
- * There is intentionally NO timeout and NO attempt to click a Stop button.
+ * Waits indefinitely until UXPilot has genuinely finished generating. A
+ * pre-existing tldraw canvas is not considered completion. The wait only
+ * resolves after generation has started and a real generated artifact is
+ * observed (new frame label, preview, export controls, or design surface).
  */
 async function waitForGenerationToFinish(
   page: Page,
-  label: string
+  label: string,
+  baselineFrameCount: number,
+  generationStarted: boolean
 ): Promise<void> {
   const startedAt = Date.now();
   let lastLogAt = startedAt;
 
   while (true) {
-    if (await isGenerationFinished(page)) {
-      const elapsedSeconds = Math.round(
-        (Date.now() - startedAt) / 1000
-      );
-
+    if (await isGenerationFinished(page, baselineFrameCount, generationStarted)) {
+      const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
       log.info(`${label} finished after ${elapsedSeconds}s.`);
       return;
     }
 
     const now = Date.now();
-
     if (now - lastLogAt >= 30_000) {
-      const elapsedSeconds = Math.round(
-        (now - startedAt) / 1000
-      );
-
-      log.info(
-        `${label} is still running after ${elapsedSeconds}s. Waiting indefinitely for completion...`
-      );
-
+      const elapsedSeconds = Math.round((now - startedAt) / 1000);
+      log.info(`${label} is still running after ${elapsedSeconds}s. Waiting indefinitely for completion...`);
       lastLogAt = now;
     }
 
-    await new Promise((resolve) =>
-      setTimeout(resolve, 2_000)
-    );
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
   }
 }
 
 async function waitForPromptInput(
   page: Page
 ): Promise<ReturnType<Page["locator"]>> {
-  const promptInput = selectors.promptInput(page).first();
+  const inputs = selectors.promptInput(page);
+  const deadline = Date.now() + 30_000;
 
-  await promptInput.waitFor({
-    state: "visible",
-    timeout: 0,
-  });
+  while (Date.now() < deadline) {
+    const count = await inputs.count();
+    for (let i = 0; i < count; i++) {
+      const candidate = inputs.nth(i);
+      if (await candidate.isVisible().catch(() => false)) {
+        return candidate;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 
-  return promptInput;
+  throw new Error("Could not find the visible UXPilot generation composer input.");
 }
-
 
 async function clickGenerateAndWait(
   page: Page,
   _timeoutMs: number,
   label: string
 ): Promise<void> {
-  await selectors.generateButton(page).first().click();
+  const baselineFrameCount = await getVisibleGeneratedFrameCount(page);
+
+  const button = selectors.generateButton(page).first();
+  await button.waitFor({ state: "visible", timeout: 15000 });
+  await button.click();
+
+  const generationStarted = await waitForGenerationStart(
+    page,
+    baselineFrameCount,
+    label
+  );
 
   await waitForGenerationToFinish(
     page,
-    label
+    label,
+    baselineFrameCount,
+    generationStarted
   );
 }
-
 
 async function attemptGenerateDesktop(
   page: Page,
@@ -224,12 +276,40 @@ async function attemptGenerateDesktop(
 
   const promptInput = await waitForPromptInput(page);
 
-  await promptInput.fill(finalPrompt);
+  await promptInput.click({ position: { x: 40, y: 25 } });
+  await promptInput.fill(finalPrompt).catch(() => undefined);
 
+  const readPromptValue = async (): Promise<string> =>
+    promptInput
+      .evaluate((element) => {
+        const node = element as HTMLElement & { value?: string };
+        return typeof node.value === "string"
+          ? node.value
+          : node.innerText || node.textContent || "";
+      })
+      .catch(() => "");
 
-  await new Promise((resolve) =>
-    setTimeout(resolve, 750)
-  );
+  const expectedPrompt = finalPrompt.replace(/\r\n/g, "\n");
+  const hasExpectedPrompt = async (): Promise<boolean> => {
+    const actual = (await readPromptValue()).replace(/\r\n/g, "\n");
+    return actual === expectedPrompt || actual.includes(expectedPrompt);
+  };
+
+  if (!(await hasExpectedPrompt())) {
+    log.warn("Generation composer fill() did not persist the full page prompt. Retrying with keyboard input...");
+    await promptInput.click({ position: { x: 40, y: 25 } });
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => undefined);
+    await page.keyboard.press("Backspace").catch(() => undefined);
+    await page.keyboard.insertText(finalPrompt);
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 750));
+
+  await waitUntil(hasExpectedPrompt, {
+    timeoutMs: 15000,
+    intervalMs: 250,
+    label: "UXPilot generation composer to contain the full page prompt",
+  });
 
 
   await saveGenerationInputScreenshot(page);
@@ -280,22 +360,29 @@ async function attemptGenerateMobile(
   page: Page,
   level: ProjectLevel
 ): Promise<void> {
-  await selectors.designSurface(page).click();
+  const baselineFrameCount = await getVisibleGeneratedFrameCount(page);
 
+  await selectors.designSurface(page).click();
 
   await selectors.generateButton(page)
     .first()
     .click();
 
-
   await selectors.generateMobileOption(page)
     .first()
     .click();
 
+  const generationStarted = await waitForGenerationStart(
+    page,
+    baselineFrameCount,
+    "mobile generation"
+  );
 
   await waitForGenerationToFinish(
     page,
-    "mobile generation"
+    "mobile generation",
+    baselineFrameCount,
+    generationStarted
   );
 }
 
