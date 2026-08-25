@@ -78,9 +78,25 @@ function columnLetter(index: number): string {
   return letter;
 }
 
+function looksLikeDriveDocumentLink(raw: string): boolean {
+  const value = (raw ?? "").trim();
+  return /^https?:\/\/(?:drive\.google\.com|docs\.google\.com)\//i.test(value);
+}
+
+/**
+ * Pages and Edits After Design may now contain a Google Drive link instead of
+ * inline JSON. Those cells are intentionally deferred until after the browser
+ * session starts, because the workflow requirement is to open the Drive file
+ * in a new tab and resolve its complete content there.
+ *
+ * Returning [] here is therefore not an error: hydrateProjectRowFromDrive()
+ * replaces the deferred value before any page/edit processing begins.
+ */
 function parseJsonColumn<T>(raw: string, columnName: string, rowNumber: number): T[] {
   const trimmed = (raw ?? "").trim();
   if (!trimmed) return [];
+  if (looksLikeDriveDocumentLink(trimmed)) return [];
+
   try {
     const parsed = JSON.parse(trimmed);
     if (!Array.isArray(parsed)) throw new Error("expected a JSON array");
@@ -88,7 +104,7 @@ function parseJsonColumn<T>(raw: string, columnName: string, rowNumber: number):
   } catch (err) {
     throw new Error(
       `Row ${rowNumber}: column "${columnName}" is not valid JSON (${(err as Error).message}). ` +
-      "Fix the cell content in the Google Sheet before this project can continue safely."
+      "For long-content columns, use a Google Drive file link; otherwise provide a valid JSON array."
     );
   }
 }
