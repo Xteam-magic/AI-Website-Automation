@@ -1,0 +1,33 @@
+CHANGED_FILES.txtAI Website Automation — final changed-file package
+
+Replace the contents of the corresponding repository files with these complete files.
+Do not overwrite files not listed here.
+
+Modified existing files:
+.env.example
+.github/workflows/scheduler.yml
+README.md
+docs/06_Sheet_Structure.txt
+src/config/config.ts
+src/elementor/convert.ts
+src/runner/pageRunner.ts
+src/runner/projectRunner.ts
+src/sheet/googleSheet.ts
+src/types/index.ts
+src/uxpilot/createProject.ts
+src/uxpilot/editProject.ts
+src/uxpilot/export.ts
+src/uxpilot/login.ts
+
+New files to create at these exact paths:
+docs/07_AI_Phase2.md
+src/sheet/contentResolver.ts
+src/ai/client.ts
+src/ai/engine.ts
+src/ai/prompt.ts
+src/ai/tools.ts
+
+Validation performed in this environment:
+- TypeScript syntax/transpile validation: 25 .ts files, no syntax diagnostics.
+- Full npm build could not be executed because external npm package installation was unavailable in this environment.
+- The uploaded live Google Sheet could not be fetched through the available connectors/web cache in this environment; the code therefore reads the live header row dynamically (A1:ZZZ), preserves every unknown column, and lets Phase 2 AI reason over/update any existing header by exact name.
