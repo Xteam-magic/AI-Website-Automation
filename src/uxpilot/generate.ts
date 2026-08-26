@@ -301,7 +301,7 @@ async function appendFinalPageInstructionToComposer(
 
   // React-controlled inputs occasionally ignore fill() after a document attachment
   // was created. Reacquire the visible composer and use keyboard insertion.
-  promptInput = await getVisibleComposerInput(page);
+  promptInput = await waitForPromptInput(page);
   await promptInput.click({ position: { x: 40, y: 25 } }).catch(() => undefined);
   await promptInput.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => undefined);
   await promptInput.press("Backspace").catch(() => undefined);
@@ -309,7 +309,7 @@ async function appendFinalPageInstructionToComposer(
 
   await waitUntil(
     async () => {
-      promptInput = await getVisibleComposerInput(page).catch(() => promptInput);
+      promptInput = await waitForPromptInput(page).catch(() => promptInput);
       const actual = await readNormalized();
       return actual.includes(normalizedText);
     },
