@@ -643,6 +643,25 @@ async function pasteIntoComposer(
   }
 }
 
+
+async function hasAutoConvertedComposerDocument(page: Page): Promise<boolean> {
+  const candidates = [
+    page.getByText(/pasted-document\.docx/i),
+    page.getByText(/auto-converted to document/i),
+  ];
+
+  for (const locator of candidates) {
+    const count = await locator.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      if (await locator.nth(i).isVisible().catch(() => false)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 async function appendProjectContextToComposer(
   page: Page,
   row: ProjectRow
@@ -663,16 +682,18 @@ async function appendProjectContextToComposer(
     return actual === expected || actual.includes(expected);
   };
 
-  // First attempt: normal Playwright fill on the currently visible control.
+  const composerHasAcceptedContext = async (): Promise<boolean> =>
+    (await contextMatches()) || (await hasAutoConvertedComposerDocument(page));
+
   await prompt.click({ position: { x: 40, y: 25 } });
   await prompt.fill(context).catch(() => undefined);
 
-  if (!(await contextMatches())) {
+  if (!(await composerHasAcceptedContext())) {
     log.warn("Composer fill() did not persist the full context. Retrying with paste...");
     await pasteIntoComposer(page, prompt, context);
   }
 
-  if (!(await contextMatches())) {
+  if (!(await composerHasAcceptedContext())) {
     log.warn("Composer paste did not persist. Reacquiring the visible composer and retrying...");
     prompt = await getVisibleComposerInput(page);
     await prompt.click({ position: { x: 40, y: 25 } });
@@ -681,42 +702,28 @@ async function appendProjectContextToComposer(
 
   await waitUntil(
     async () => {
-      // UXPilot may replace the composer DOM node after it receives input.
       prompt = await getVisibleComposerInput(page).catch(() => prompt);
-      return contextMatches();
+      return (await contextMatches()) || (await hasAutoConvertedComposerDocument(page));
     },
     {
-      timeoutMs: 15000,
+      timeoutMs: 30000,
       intervalMs: 250,
-      label: "UXPilot main composer to contain project context",
+      label: "UXPilot main composer or attached document to accept project context",
     }
   );
 
-  const sendButton = page
-    .getByRole("button", { name: /^(send|generate)$/i })
-    .first();
-
-  await waitUntil(
-    async () => {
-      try {
-        return (await sendButton.count()) > 0 &&
-          (await sendButton.isVisible()) &&
-          (await sendButton.isEnabled());
-      } catch {
-        return false;
-      }
-    },
-    {
-      timeoutMs: 15000,
-      intervalMs: 200,
-      label: "UXPilot send/generate button to become enabled",
-    }
-  );
+  // Large project context is automatically converted by UXPilot into a
+  // document attachment (for example, pasted-document.docx). In that case
+  // the textarea intentionally no longer contains the original full string.
+  // Wait here for that attachment conversion/upload to fully settle before
+  // the page-specific prompt is appended later by generate.ts.
+  await waitForComposerUploads(page);
 
   log.info(
-    `Project context added to the UXPilot composer and verified (${context.length} chars).`
+    `Project context accepted by the UXPilot composer (${context.length} chars), as text or an auto-converted document.`
   );
 }
+
 async function dismissOptionalPopup(page: Page): Promise<void> {
   const maybeLater = selectors.maybeLaterButton(page).first();
   try {
