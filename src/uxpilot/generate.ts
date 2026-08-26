@@ -23,6 +23,11 @@ const selectors = {
       'textarea[placeholder="Describe your design, @ to reference images or documents"], [contenteditable="true"][role="textbox"], [contenteditable="true"]'
     ),
 
+  sendButton: (page: Page) =>
+    page.getByRole("button", { name: "Send", exact: true }).or(
+      page.locator('button[aria-label="Send"]')
+    ).first(),
+
   generateButton: (page: Page) =>
     page.getByRole("button", { name: /generate|send/i }),
 
@@ -239,9 +244,17 @@ async function clickGenerateAndWait(
 ): Promise<void> {
   const baselineFrameCount = await getVisibleGeneratedFrameCount(page);
 
-  const button = selectors.generateButton(page).first();
-  await button.waitFor({ state: "visible", timeout: 15000 });
-  await button.click();
+  const sendButton = selectors.sendButton(page);
+  await sendButton.waitFor({ state: "visible", timeout: 15000 });
+
+  const enabled = await sendButton.isEnabled().catch(() => false);
+  if (!enabled) {
+    throw new Error("UXPilot Send button is visible but disabled.");
+  }
+
+  log.info("[UXPilot/Generate] Send button is visible and enabled. Clicking Send...");
+  await sendButton.click();
+  log.info("[UXPilot/Generate] Send clicked successfully. Waiting for generation to start...");
 
   const generationStarted = await waitForGenerationStart(
     page,
@@ -261,33 +274,53 @@ async function appendFinalPageInstructionToComposer(
   page: Page,
   text: string
 ): Promise<void> {
-  const promptInput = await waitForPromptInput(page);
-  await promptInput.click({ position: { x: 40, y: 25 } });
+  let promptInput = await waitForPromptInput(page);
+  const normalizedText = text.replace(/\r\n/g, "\n").trim();
 
-  const modifier = process.platform === "darwin" ? "Meta" : "Control";
-  await page.keyboard.press(`${modifier}+End`).catch(() => undefined);
+  // UXPilot may auto-convert the large project context into a document attachment.
+  // After that conversion, the visible composer is a normal input again and the
+  // page-specific instruction must be inserted as a fresh, real composer value.
+  await promptInput.click({ position: { x: 40, y: 25 } }).catch(() => undefined);
+  await promptInput.fill(text);
+
+  const readNormalized = async (): Promise<string> =>
+    (await promptInput
+      .evaluate((element) => {
+        const node = element as HTMLElement & { value?: string };
+        if (typeof node.value === "string") return node.value;
+        return node.innerText || node.textContent || "";
+      })
+      .catch(() => ""))
+      .replace(/\r\n/g, "\n")
+      .trim();
+
+  if ((await readNormalized()).includes(normalizedText)) {
+    log.info(`Final page instruction inserted into UXPilot composer (${normalizedText.length} chars).`);
+    return;
+  }
+
+  // React-controlled inputs occasionally ignore fill() after a document attachment
+  // was created. Reacquire the visible composer and use keyboard insertion.
+  promptInput = await getVisibleComposerInput(page);
+  await promptInput.click({ position: { x: 40, y: 25 } }).catch(() => undefined);
+  await promptInput.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => undefined);
+  await promptInput.press("Backspace").catch(() => undefined);
   await page.keyboard.insertText(text);
 
-  const normalizedText = text.replace(/\r\n/g, "\n").trim();
   await waitUntil(
     async () => {
-      const actual = (await promptInput
-        .evaluate((element) => {
-          const node = element as HTMLElement & { value?: string };
-          return typeof node.value === "string"
-            ? node.value
-            : node.innerText || node.textContent || "";
-        })
-        .catch(() => "")).replace(/\r\n/g, "\n").trim();
-
+      promptInput = await getVisibleComposerInput(page).catch(() => promptInput);
+      const actual = await readNormalized();
       return actual.includes(normalizedText);
     },
     {
-      timeoutMs: 10000,
+      timeoutMs: 15000,
       intervalMs: 200,
       label: "UXPilot composer to contain the final page instruction",
     }
   );
+
+  log.info(`Final page instruction inserted into UXPilot composer (${normalizedText.length} chars).`);
 }
 
 async function attemptGenerateDesktop(
