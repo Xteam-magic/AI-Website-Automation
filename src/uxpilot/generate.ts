@@ -6,6 +6,7 @@ import { logger } from "../logger/logger";
 import { retry } from "../helpers/retry";
 import { waitUntil } from "../helpers/wait";
 import { ProjectLevel } from "../types";
+import { waitForComposerUploads } from "./createProject";
 
 const log = logger.scope("UXPilot/Generate");
 
@@ -264,7 +265,18 @@ async function attemptGenerateDesktop(
 ): Promise<void> {
   const projectContext = await getStoredProjectContext(page);
 
-  const finalPrompt = projectContext
+  // Any project files/images attached to the composer must finish uploading
+  // before we touch the prompt or submit it. Otherwise UXPilot can silently
+  // ignore the attachment while the text is already being sent.
+  await waitForComposerUploads(page);
+
+  const attachmentInstruction = [
+    "",
+    "ATTACHED FILE(S) — IMPORTANT INSTRUCTION:",
+    "Please carefully review every attached file and consider ALL items, notes, explanations, requirements, visual references, and other information contained in the attached file(s). Do not ignore or skip any part of the attached file(s). Treat their contents as authoritative project references and apply all relevant details to the current page design.",
+  ].join("\n");
+
+  const finalPromptBase = projectContext
     ? [
         projectContext,
         "",
@@ -273,6 +285,7 @@ async function attemptGenerateDesktop(
       ].join("\n")
     : prompt;
 
+  const finalPrompt = `${finalPromptBase}${attachmentInstruction}`;
 
   const promptInput = await waitForPromptInput(page);
 
