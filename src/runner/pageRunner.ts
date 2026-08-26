@@ -204,15 +204,31 @@ export async function runPage(
       const fullProjectPrompt =
         [...filteredPromptBlocks, promptBlock].join("\n\n");
 
-      await googleSheetService.updateRow(
+      // Persist the exact prompt that is actually sent to the UXPilot composer.
+      // Prefer the exact live header returned by Google Sheets so capitalization
+      // or minor naming differences in the admin-created column do not prevent
+      // the write. Fall back to the typed header mapping for the known column.
+      const promptHeaderName =
+        row.headers.find((header) => {
+          const normalized = header
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "");
+          return (
+            normalized === "fulluxpilotprojectprompt" ||
+            normalized === "fulluxpilioprojectprompt"
+          );
+        }) ?? "Full ux pilio project prompt";
+
+      await googleSheetService.updateColumnByHeader(
         row.rowNumber,
-        {
-          fullUxPilotProjectPrompt: fullProjectPrompt,
-        }
+        promptHeaderName,
+        fullProjectPrompt
       );
 
       row.fullUxPilotProjectPrompt =
         fullProjectPrompt;
+      row.rawColumns[promptHeaderName] = fullProjectPrompt;
     }
   );
 
