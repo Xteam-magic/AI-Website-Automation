@@ -32,11 +32,9 @@ const selectors = {
   modelSlider: (page: Page) =>
     page.locator("div.relative.cursor-pointer.touch-none").last(),
   mainPromptInput: (page: Page) =>
-    page.locator(`
-      textarea[placeholder="Describe your design, @ to reference images or documents"],
-      [contenteditable="true"][role="textbox"],
-      [contenteditable="true"]
-    `),
+    page.locator(
+      'textarea[placeholder="Describe your design, @ to reference images or documents"]'
+    ),
   composerToolbar: (page: Page) =>
     page.locator('[data-testid="chat-composer-toolbar"]').first(),
   addWebsiteButton: (page: Page) =>
@@ -429,75 +427,11 @@ async function uploadFileThroughComposer(page: Page, localPath: string): Promise
 }
 
 async function waitForComposerAttachment(page: Page): Promise<void> {
-  await waitForComposerUploads(page);
+  await new Promise((resolve) => setTimeout(resolve, 1200));
   await selectors.mainPromptInput(page).waitFor({
     state: "visible",
     timeout: 10000,
   });
-}
-
-/**
- * UXPilot keeps the attachment chip in an "Uploading..." state after the
- * browser file input has accepted the file. The file is not necessarily
- * available to the composer immediately, so the workflow must wait for that
- * state to disappear before it edits the prompt or starts generation.
- */
-export async function waitForComposerUploads(page: Page): Promise<void> {
-  const indicators = [
-    page.getByText(/^\s*Uploading(?:\.{1,3})?\s*$/i),
-    page.getByRole("button", { name: /Uploading/i }),
-    page.locator('[aria-label*="uploading" i], [data-testid*="upload" i][aria-busy="true"]'),
-  ];
-  const timeoutMs = Math.max(config.timeouts.imageUploadMs * 2, 60_000);
-
-  const isUploadingVisible = async (): Promise<boolean> => {
-    for (const locator of indicators) {
-      const count = await locator.count().catch(() => 0);
-      for (let i = 0; i < count; i++) {
-        if (await locator.nth(i).isVisible().catch(() => false)) return true;
-      }
-    }
-    return false;
-  };
-
-  // The Uploading chip can render a few hundred milliseconds after setInputFiles.
-  // Give UXPilot enough time to expose it before checking completion.
-  await new Promise((resolve) => setTimeout(resolve, 500));
-
-  let uploadStarted = await isUploadingVisible();
-  if (!uploadStarted) {
-    try {
-      await waitUntil(isUploadingVisible, {
-        timeoutMs: 10_000,
-        intervalMs: 200,
-        label: "UXPilot composer upload indicator to appear",
-      });
-      uploadStarted = true;
-    } catch {
-      uploadStarted = false;
-    }
-  }
-
-  if (uploadStarted) {
-    log.info("UXPilot composer upload detected. Waiting for upload to finish...");
-    await waitUntil(
-      async () => !(await isUploadingVisible()),
-      {
-        timeoutMs,
-        intervalMs: 250,
-        label: "UXPilot composer attachments to finish uploading",
-      }
-    );
-
-    // Allow the attachment chip/state to settle after the Uploading label disappears.
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    log.info("UXPilot composer attachments finished uploading.");
-  } else {
-    // Even when UXPilot does not expose the Uploading text, give the attachment
-    // state a deterministic settling window instead of racing the composer.
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    log.info("No visible UXPilot upload indicator found; continuing after attachment settle.");
-  }
 }
 
 async function isVisible(locator: ReturnType<Page["locator"]>): Promise<boolean> {
@@ -568,159 +502,157 @@ async function closeModelPicker(page: Page): Promise<void> {
   log.info("Model picker closed successfully.");
 }
 
-async function getVisibleComposerInput(page: Page) {
-  const candidates = selectors.mainPromptInput(page);
-  const count = await candidates.count();
-
-  for (let i = 0; i < count; i++) {
-    const candidate = candidates.nth(i);
-    if (await candidate.isVisible().catch(() => false)) {
-      return candidate;
-    }
-  }
-
-  throw new Error(
-    "Could not find the visible UXPilot main composer input (textarea/contenteditable)."
-  );
-}
-
-async function readComposerContent(locator: ReturnType<Page["locator"]>): Promise<string> {
-  return locator
+async function composerTextValue(page: Page): Promise<string> {
+  const prompt = selectors.mainPromptInput(page).first();
+  return prompt
     .evaluate((element) => {
-      const node = element as HTMLElement & { value?: string };
-      if (typeof node.value === "string") return node.value;
-      return node.innerText || node.textContent || "";
+      const node = element as HTMLTextAreaElement;
+      return node.value || node.innerText || node.textContent || "";
     })
     .catch(() => "");
 }
 
-function normalizeComposerText(value: string): string {
-  return value.replace(/\r\n/g, "\n").replace(/\u00a0/g, " ").trim();
+async function isComposerUploadBusy(page: Page): Promise<boolean> {
+  const text = await page.locator("body").innerText().catch(() => "");
+  const busyText = /\b(uploading|processing|preparing|converting)\b/i.test(text);
+  const busyNodes = await page.locator(
+    '[aria-label*="uploading" i], [aria-label*="processing" i], [data-testid*="uploading" i], [data-testid*="upload" i]'
+  ).count().catch(() => 0);
+  return busyText || busyNodes > 0;
 }
 
-async function setClipboardText(page: Page, value: string): Promise<boolean> {
-  try {
-    const origin = new URL(page.url()).origin;
-    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
-      origin,
-    });
-  } catch {
-    // Permission grant is best-effort; clipboard APIs may still work in the browser.
-  }
-
-  try {
-    return await page.evaluate(async (text) => {
-      try {
-        await navigator.clipboard.writeText(text);
-        return true;
-      } catch {
-        return false;
-      }
-    }, value);
-  } catch {
-    return false;
-  }
+async function hasComposerAttachment(page: Page): Promise<boolean> {
+  const attachmentText = await page.locator(
+    'button, [role="button"], [data-testid], span, div'
+  ).filter({ hasText: /pasted-document\.docx|\.docx$|\.pdf$|\.png$|\.jpg$|\.jpeg$|attached document/i }).count().catch(() => 0);
+  return attachmentText > 0;
 }
 
-async function pasteIntoComposer(
-  page: Page,
-  locator: ReturnType<Page["locator"]>,
-  context: string
-): Promise<void> {
-  await locator.click({ position: { x: 40, y: 25 } });
-  await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => undefined);
-  await page.keyboard.press("Backspace").catch(() => undefined);
+/**
+ * UXPilot converts sufficiently large composer input into an uploaded document.
+ * The visible textarea then no longer contains the original full text. Therefore
+ * success is based on either the full text remaining in the textarea OR the
+ * attachment/document chip appearing, followed by a real upload-settle wait.
+ */
+export async function waitForComposerUploads(page: Page): Promise<void> {
+  const start = Date.now();
+  const discoveryTimeout = 20_000;
+  let attachmentSeen = false;
+  let busySeen = false;
+  let quietChecks = 0;
 
-  const clipboardReady = await setClipboardText(page, context);
-  if (clipboardReady) {
-    await page.keyboard.press(process.platform === "darwin" ? "Meta+V" : "Control+V");
-    await new Promise((resolve) => setTimeout(resolve, 900));
-  }
+  while (Date.now() - start < discoveryTimeout) {
+    attachmentSeen = attachmentSeen || await hasComposerAttachment(page);
+    busySeen = busySeen || await isComposerUploadBusy(page);
+    const value = await composerTextValue(page);
 
-  if (normalizeComposerText(await readComposerContent(locator)) !== normalizeComposerText(context)) {
-    await page.keyboard.insertText(context);
-    await new Promise((resolve) => setTimeout(resolve, 900));
-  }
-}
-
-
-async function hasAutoConvertedComposerDocument(page: Page): Promise<boolean> {
-  const candidates = [
-    page.getByText(/pasted-document\.docx/i),
-    page.getByText(/auto-converted to document/i),
-  ];
-
-  for (const locator of candidates) {
-    const count = await locator.count().catch(() => 0);
-    for (let i = 0; i < count; i++) {
-      if (await locator.nth(i).isVisible().catch(() => false)) {
-        return true;
-      }
+    if (attachmentSeen || busySeen || value.trim().length > 0) {
+      break;
     }
+    await page.waitForTimeout(250);
   }
 
-  return false;
+  const settleDeadline = Date.now() + 120_000;
+  while (Date.now() < settleDeadline) {
+    const busy = await isComposerUploadBusy(page);
+    attachmentSeen = attachmentSeen || await hasComposerAttachment(page);
+
+    if (!busy) {
+      quietChecks += 1;
+      if (quietChecks >= 3) {
+        await page.waitForTimeout(700);
+        log.info(
+          attachmentSeen
+            ? "UXPilot composer attachment upload completed and settled."
+            : "No visible UXPilot upload indicator found; composer settled and is ready for the next instruction."
+        );
+        return;
+      }
+    } else {
+      quietChecks = 0;
+      log.info("UXPilot composer is still uploading/processing; waiting...");
+    }
+
+    await page.waitForTimeout(500);
+  }
+
+  throw new Error("Timed out waiting for UXPilot composer attachments to finish uploading/processing.");
 }
 
-async function appendProjectContextToComposer(
-  page: Page,
-  row: ProjectRow
-): Promise<void> {
+async function setComposerText(page: Page, text: string): Promise<boolean> {
+  let prompt = selectors.mainPromptInput(page).first();
+  await prompt.waitFor({ state: "visible", timeout: 15_000 });
+  await prompt.click().catch(() => undefined);
+  await prompt.fill(text).catch(() => undefined);
+
+  let actual = await composerTextValue(page);
+  if (actual.trim() === text.trim()) return true;
+
+  await prompt.evaluate((element, value) => {
+    const textarea = element as HTMLTextAreaElement;
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    setter?.call(textarea, value);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.dispatchEvent(new Event("change", { bubbles: true }));
+  }, text).catch(() => undefined);
+
+  actual = await composerTextValue(page);
+  if (actual.trim() === text.trim()) return true;
+
+  prompt = selectors.mainPromptInput(page).first();
+  await prompt.click().catch(() => undefined);
+  await prompt.press("Control+A").catch(() => undefined);
+  await prompt.press("Backspace").catch(() => undefined);
+  await page.keyboard.insertText(text).catch(() => undefined);
+
+  actual = await composerTextValue(page);
+  return actual.trim() === text.trim();
+}
+
+async function appendProjectContextToComposer(page: Page, row: ProjectRow): Promise<void> {
   const context = buildProjectPromptContext(row);
+
   await page.evaluate((value) => {
     (window as unknown as { __xmagicProjectPromptContext?: string }).__xmagicProjectPromptContext = value;
   }, context);
 
   await closeModelPicker(page);
 
-  let prompt = await getVisibleComposerInput(page);
-  await prompt.waitFor({ state: "visible", timeout: 10000 });
+  const prompt = selectors.mainPromptInput(page).first();
+  await prompt.waitFor({ state: "visible", timeout: 15_000 });
 
-  const contextMatches = async (): Promise<boolean> => {
-    const actual = normalizeComposerText(await readComposerContent(prompt));
-    const expected = normalizeComposerText(context);
-    return actual === expected || actual.includes(expected);
-  };
-
-  const composerHasAcceptedContext = async (): Promise<boolean> =>
-    (await contextMatches()) || (await hasAutoConvertedComposerDocument(page));
-
-  await prompt.click({ position: { x: 40, y: 25 } });
-  await prompt.fill(context).catch(() => undefined);
-
-  if (!(await composerHasAcceptedContext())) {
-    log.warn("Composer fill() did not persist the full context. Retrying with paste...");
-    await pasteIntoComposer(page, prompt, context);
+  const inserted = await setComposerText(page, context);
+  if (!inserted) {
+    // Large contexts are expected to be auto-converted by UXPilot into a
+    // document attachment. Do not keep rewriting the composer while that
+    // conversion is happening.
+    log.info("Full project context was not retained as textarea text; waiting for UXPilot auto-converted document attachment.");
   }
 
-  if (!(await composerHasAcceptedContext())) {
-    log.warn("Composer paste did not persist. Reacquiring the visible composer and retrying...");
-    prompt = await getVisibleComposerInput(page);
-    await prompt.click({ position: { x: 40, y: 25 } });
-    await prompt.fill(context).catch(() => undefined);
-  }
+  // Do not wait for the upload to finish here. Large project context is
+  // auto-converted by UXPilot into a document attachment, and that upload can
+  // remain in an "Uploading..." state for an extended period. The next phase
+  // (generate.ts) is responsible for waiting until that upload is fully
+  // settled before adding the final page instruction and pressing Send.
+  const acceptanceDeadline = Date.now() + 60_000;
+  while (Date.now() < acceptanceDeadline) {
+    const currentText = await composerTextValue(page);
+    const attachmentPresent = await hasComposerAttachment(page);
 
-  await waitUntil(
-    async () => {
-      prompt = await getVisibleComposerInput(page).catch(() => prompt);
-      return (await contextMatches()) || (await hasAutoConvertedComposerDocument(page));
-    },
-    {
-      timeoutMs: 30000,
-      intervalMs: 250,
-      label: "UXPilot main composer or attached document to accept project context",
+    if (attachmentPresent || currentText.trim() === context.trim()) {
+      log.info(
+        attachmentPresent
+          ? `Project context was accepted by UXPilot as an attachment (${context.length} chars). Waiting for upload completion in the generation phase.`
+          : `Project context was accepted directly in the UXPilot composer (${context.length} chars).`
+      );
+      return;
     }
-  );
 
-  // Large project context is automatically converted by UXPilot into a
-  // document attachment (for example, pasted-document.docx). In that case
-  // the textarea intentionally no longer contains the original full string.
-  // Wait here for that attachment conversion/upload to fully settle before
-  // the page-specific prompt is appended later by generate.ts.
-  await waitForComposerUploads(page);
+    await page.waitForTimeout(500);
+  }
 
-  log.info(
-    `Project context accepted by the UXPilot composer (${context.length} chars), as text or an auto-converted document.`
+  throw new Error(
+    "Timed out waiting for UXPilot to accept the project context as text or an auto-converted document attachment."
   );
 }
 
@@ -908,7 +840,6 @@ export async function uploadSourceImages(
 
         if ((await fileInputs.count()) > 0) {
           await fileInputs.last().setInputFiles(localPath);
-          await waitForComposerUploads(page);
           return;
         }
 
@@ -919,7 +850,6 @@ export async function uploadSourceImages(
           trigger.click({ trial: true }).catch(() => undefined),
         ]);
         await fileChooser.setFiles(localPath);
-        await waitForComposerUploads(page);
       },
       {
         retries: config.retries.upload,
@@ -941,16 +871,8 @@ export async function setupProjectContext(
   await createProject(page, row);
   await selectModel(page, row.requiredProjectLevel);
   await addWebsiteLink(page, row.sourceLinks);
-
-  // Keep the same proven order as the original working flow: put the full
-  // project context into the composer first, then attach reference assets.
-  // UXPilot may keep an attachment in an Uploading state and temporarily
-  // re-render the composer; waiting for upload while the context is being
-  // verified can make a valid fill look empty.
-  await appendProjectContextToComposer(page, row);
-
-  // Attach all reference assets only after the project context is present.
   await uploadLogo(page, row.logoUrl);
+  await appendProjectContextToComposer(page, row);
   await uploadSourceImages(page, row.sourceImages);
   await waitForComposerUploads(page);
 }
