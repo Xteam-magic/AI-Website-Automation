@@ -3,8 +3,8 @@ import path from "path";
 import type { Page } from "playwright";
 import { config } from "../config/config";
 import { logger } from "../logger/logger";
-import { retry } from "../helpers/retry";
 import { ProjectLevel } from "../types";
+import { waitForComposerUploads } from "./createProject";
 
 const log = logger.scope("UXPilot/Generate");
 
@@ -20,275 +20,213 @@ const selectors = {
     page.locator(
       'textarea[placeholder="Describe your design, @ to reference images or documents"]'
     ),
-
-  generateButton: (page: Page) =>
-    page.getByRole("button", { name: /generate|send/i }),
-
+  sendButton: (page: Page) =>
+    page.locator('button[aria-label="Send"]:visible').last(),
   stopButton: (page: Page) =>
     page.getByRole("button", { name: /^stop$/i }),
-
   spinner: (page: Page) =>
     page
       .getByRole("status")
       .or(page.locator("[class*='spinner' i], [class*='loading' i]")),
-
   previewFrame: (page: Page) =>
     page.locator("iframe[title*='preview' i], [class*='preview' i]"),
-
   copyExportControls: (page: Page) =>
     page.getByRole("button", { name: /copy\s*\/\s*export/i }),
-
-  designSurface: (page: Page) =>
-    page
-      .locator(
-        '[data-testid*="canvas" i], [data-testid*="design-surface" i], [class*="design-surface" i], [class*="canvas" i]'
-      )
-      .first(),
-
-  generateMobileOption: (page: Page) =>
-    page
-      .getByRole("menuitem", { name: /mobile/i })
-      .or(page.getByText(/generate mobile version/i)),
+  sourceCode: (page: Page) =>
+    page.getByText(/^Source Code$/i),
+  generatedDesignLabels: (page: Page) =>
+    page.getByText(
+      /^[^\n-]+-\s*(landing|home|pricing|dashboard|about|contact|blog)/i
+    ),
+  generationStatusText: (page: Page) =>
+    page.getByText(/generating|designing|creating|processing/i),
 };
-
 
 async function saveGenerationInputScreenshot(page: Page): Promise<void> {
   const screenshotsDir = path.join(process.cwd(), "screenshots");
   fs.mkdirSync(screenshotsDir, { recursive: true });
-
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-
   const screenshotPath = path.join(
     screenshotsDir,
     `uxpilot-generation-input-${timestamp}.png`
   );
-
-  await page.screenshot({
-    path: screenshotPath,
-    fullPage: true,
-  });
-
+  await page.screenshot({ path: screenshotPath, fullPage: true });
   log.info(`Generation input screenshot saved: ${screenshotPath}`);
 }
-
 
 async function getStoredProjectContext(page: Page): Promise<string> {
   try {
     return await page.evaluate(
       () =>
-        (
-          window as unknown as {
-            __xmagicProjectPromptContext?: string;
-          }
-        ).__xmagicProjectPromptContext || ""
+        (window as unknown as { __xmagicProjectPromptContext?: string })
+          .__xmagicProjectPromptContext || ""
     );
   } catch {
     return "";
   }
 }
 
-
-async function isGenerationFinished(page: Page): Promise<boolean> {
-  const stopVisible = await selectors
-    .stopButton(page)
-    .first()
-    .isVisible()
-    .catch(() => false);
-
-  if (stopVisible) return false;
-
-  const spinnerVisible = await selectors
-    .spinner(page)
-    .first()
-    .isVisible()
-    .catch(() => false);
-
-  if (spinnerVisible) return false;
-
-  const generatedFrameCount = await page
-    .locator('[class*="tl-frame-label" i]')
-    .filter({ visible: true })
-    .count()
-    .catch(() => 0);
-
-  if (generatedFrameCount > 0) return true;
-
-  const sourceCodeButton = page
-    .getByRole("button", { name: /source code/i })
-    .or(page.locator('button[title*="source code" i]'))
-    .or(page.locator('button:has(svg[class*="lucide-code" i])'))
-    .first();
-
-  if (
-    (await sourceCodeButton.count()) > 0 &&
-    (await sourceCodeButton.isVisible().catch(() => false))
-  ) {
-    return true;
-  }
-
-  return false;
+async function composerValue(page: Page): Promise<string> {
+  const input = selectors.promptInput(page).last();
+  return input
+    .evaluate((element) => {
+      const node = element as HTMLTextAreaElement;
+      return node.value || node.innerText || node.textContent || "";
+    })
+    .catch(() => "");
 }
 
-/**
- * Waits indefinitely until UXPilot has genuinely finished generating.
- * There is intentionally NO timeout and NO attempt to click a Stop button.
- */
+async function waitForPromptInput(page: Page): Promise<ReturnType<Page["locator"]>> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const inputs = selectors.promptInput(page);
+    const count = await inputs.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const candidate = inputs.nth(i);
+      if (await candidate.isVisible().catch(() => false)) return candidate;
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error("Could not find the visible UXPilot generation composer input.");
+}
+
+async function setFinalPageInstruction(page: Page, text: string): Promise<void> {
+  let input = await waitForPromptInput(page);
+  await input.click().catch(() => undefined);
+  await input.fill(text).catch(() => undefined);
+
+  const read = async () => (await composerValue(page)).replace(/\r\n/g, "\n").trim();
+  const target = text.replace(/\r\n/g, "\n").trim();
+
+  if ((await read()) === target) {
+    return;
+  }
+
+  await input.evaluate((element, value) => {
+    const textarea = element as HTMLTextAreaElement;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value"
+    )?.set;
+    setter?.call(textarea, value);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.dispatchEvent(new Event("change", { bubbles: true }));
+  }, text).catch(() => undefined);
+
+  if ((await read()) === target) return;
+
+  input = await waitForPromptInput(page);
+  await input.click().catch(() => undefined);
+  await input.press("Control+A").catch(() => undefined);
+  await input.press("Backspace").catch(() => undefined);
+  await page.keyboard.insertText(text).catch(() => undefined);
+
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    if ((await read()) === target) return;
+    await page.waitForTimeout(250);
+  }
+
+  throw new Error(
+    "UXPilot final page instruction could not be inserted into the main composer."
+  );
+}
+
+async function getGeneratedLabelCount(page: Page): Promise<number> {
+  return selectors.generatedDesignLabels(page).count().catch(() => 0);
+}
+
+async function getSourceCodeCount(page: Page): Promise<number> {
+  return selectors.sourceCode(page).count().catch(() => 0);
+}
+
+async function hasRealGenerationArtifact(
+  page: Page,
+  baselineLabels: number,
+  baselineSourceCode: number
+): Promise<boolean> {
+  if ((await getGeneratedLabelCount(page)) > baselineLabels) return true;
+  if ((await getSourceCodeCount(page)) > baselineSourceCode) return true;
+
+  const exportVisible =
+    (await selectors.copyExportControls(page).count()) > 0 &&
+    (await selectors.copyExportControls(page)
+      .first()
+      .isVisible()
+      .catch(() => false));
+  if (exportVisible && baselineSourceCode === 0) return true;
+
+  const previewVisible =
+    (await selectors.previewFrame(page).count()) > 0 &&
+    (await selectors.previewFrame(page)
+      .first()
+      .isVisible()
+      .catch(() => false));
+  return previewVisible;
+}
+
 async function waitForGenerationToFinish(
   page: Page,
-  label: string
+  label: string,
+  baselineLabels: number,
+  baselineSourceCode: number
 ): Promise<void> {
   const startedAt = Date.now();
   let lastLogAt = startedAt;
+  let artifactSeen = false;
 
   while (true) {
-    if (await isGenerationFinished(page)) {
-      const elapsedSeconds = Math.round(
-        (Date.now() - startedAt) / 1000
-      );
+    const stopVisible = await selectors.stopButton(page).first().isVisible().catch(() => false);
+    const spinnerVisible = await selectors.spinner(page).first().isVisible().catch(() => false);
+    if (await hasRealGenerationArtifact(page, baselineLabels, baselineSourceCode)) {
+      artifactSeen = true;
+    }
 
+    if (artifactSeen && !stopVisible && !spinnerVisible) {
+      const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
       log.info(`${label} finished after ${elapsedSeconds}s.`);
       return;
     }
 
     const now = Date.now();
-
     if (now - lastLogAt >= 30_000) {
-      const elapsedSeconds = Math.round(
-        (now - startedAt) / 1000
-      );
-
       log.info(
-        `${label} is still running after ${elapsedSeconds}s. Waiting indefinitely for completion...`
+        `${label} is still running after ${Math.round((now - startedAt) / 1000)}s. Waiting for genuine completion...`
       );
-
       lastLogAt = now;
     }
 
-    await new Promise((resolve) =>
-      setTimeout(resolve, 2_000)
-    );
+    await page.waitForTimeout(2_000);
   }
 }
 
-async function waitForPromptInput(
-  page: Page
-): Promise<ReturnType<Page["locator"]>> {
-  const promptInput = selectors.promptInput(page).first();
+async function clickSendAndWait(page: Page, label: string): Promise<void> {
+  const baselineLabels = await getGeneratedLabelCount(page);
+  const baselineSourceCode = await getSourceCodeCount(page);
 
-  await promptInput.waitFor({
-    state: "visible",
-    timeout: 0,
-  });
+  const send = selectors.sendButton(page);
+  await send.waitFor({ state: "visible", timeout: 30_000 });
 
-  return promptInput;
-}
+  const enabledDeadline = Date.now() + 30_000;
+  while (Date.now() < enabledDeadline) {
+    if (await send.isEnabled().catch(() => false)) break;
+    await page.waitForTimeout(250);
+  }
+  if (!(await send.isEnabled().catch(() => false))) {
+    throw new Error("UXPilot Send button remained disabled after the composer became visible.");
+  }
 
-
-async function clickGenerateAndWait(
-  page: Page,
-  _timeoutMs: number,
-  label: string
-): Promise<void> {
-  await selectors.generateButton(page).first().click();
+  log.info('[UXPilot/Generate] Send button is visible and enabled. Clicking Send...');
+  await send.scrollIntoViewIfNeeded().catch(() => undefined);
+  await send.click();
+  log.info('[UXPilot/Generate] Send clicked successfully. Waiting for generation to finish...');
 
   await waitForGenerationToFinish(
     page,
-    label
+    label,
+    baselineLabels,
+    baselineSourceCode
   );
-}
-
-
-async function waitForAttachmentUploadToFinish(page: Page): Promise<void> {
-  const startedAt = Date.now();
-  let sawUploading = false;
-  let lastLogAt = startedAt;
-
-  while (true) {
-    const state = await page.evaluate(() => {
-      const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
-      const uploading = /\bUploading(?:\.{0,3})?\b/i.test(bodyText);
-
-      const attachmentVisible = Array.from(
-        document.querySelectorAll("button, [role=button], [data-testid], span, div")
-      ).some((element) => {
-        const text = (element.textContent || "").replace(/\s+/g, " ").trim();
-        if (
-          !/pasted-document/i.test(text) &&
-          !/\.(docx|pdf|md|txt|png|jpe?g|webp)$/i.test(text)
-        ) {
-          return false;
-        }
-        const rect = (element as HTMLElement).getBoundingClientRect();
-        const style = window.getComputedStyle(element);
-        return (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          style.display !== "none" &&
-          style.visibility !== "hidden"
-        );
-      });
-
-      return { uploading, attachmentVisible };
-    });
-
-    if (state.uploading) sawUploading = true;
-
-    if (!state.uploading && (state.attachmentVisible || sawUploading)) {
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      const stillUploading = await page.evaluate(() =>
-        /\bUploading(?:\.{0,3})?\b/i.test(
-          (document.body?.innerText || "").replace(/\s+/g, " ").trim()
-        )
-      );
-
-      if (!stillUploading) {
-        log.info("UXPilot attachment upload completed; continuing to final page instruction.");
-        return;
-      }
-    }
-
-    const now = Date.now();
-    if (now - lastLogAt >= 15_000) {
-      log.info(
-        `Waiting for UXPilot attachment upload to finish after ${Math.round(
-          (now - startedAt) / 1000
-        )}s...`
-      );
-      lastLogAt = now;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 750));
-  }
-}
-
-const ATTACHED_DOCUMENT_INSTRUCTION = [
-  "IMPORTANT: The attached document contains the complete project information, requirements, content, constraints, design guidance, specifications, and all other relevant details.",
-  "Treat the attached document as the authoritative source. Carefully use every relevant piece of information from it and do not omit, ignore, or replace any applicable detail when designing this page.",
-].join("\n");
-
-async function clickSendAndWaitForGeneration(
-  page: Page,
-  label: string
-): Promise<void> {
-  const sendButton = page.locator('button[aria-label="Send"]').first();
-
-  await sendButton.waitFor({
-    state: "visible",
-    timeout: 30000,
-  });
-
-  await page.waitForFunction(() => {
-    const button = document.querySelector(
-      'button[aria-label="Send"]'
-    ) as HTMLButtonElement | null;
-    return Boolean(button && !button.disabled);
-  }, undefined, { timeout: 30000 });
-
-  log.info("Send button is visible and enabled. Clicking Send...");
-  await sendButton.click();
-  log.info("Send clicked successfully. Waiting for the real design generation to finish...");
-
-  await waitForGenerationToFinish(page, label);
 }
 
 async function attemptGenerateDesktop(
@@ -297,32 +235,38 @@ async function attemptGenerateDesktop(
   level: ProjectLevel,
   onPromptReady?: (fullPrompt: string) => Promise<void>
 ): Promise<void> {
-  await waitForAttachmentUploadToFinish(page);
+  await waitForComposerUploads(page);
 
-  const finalPrompt = [
-    ATTACHED_DOCUMENT_INSTRUCTION,
+  const projectContext = await getStoredProjectContext(page);
+  const attachmentInstruction = [
     "",
-    "CURRENT PAGE PROMPT:",
-    prompt,
+    "ATTACHED DOCUMENT INSTRUCTION:",
+    "Please carefully review ALL contents of the attached document(s), including every requirement, note, explanation, content item, visual reference, constraint, and project detail. Use all relevant information from the attached document(s) when designing this page. Do not ignore, omit, or summarize away any important instruction or content from the attachment(s). Treat the attached document(s) as authoritative project material.",
   ].join("\n");
 
-  const promptInput = await waitForPromptInput(page);
-  await promptInput.focus();
-  await promptInput.fill(finalPrompt);
+  const pageInstruction = [
+    "CURRENT PAGE PROMPT:",
+    prompt.trim(),
+    attachmentInstruction,
+  ].join("\n\n");
 
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  await saveGenerationInputScreenshot(page);
+  // This is the canonical merged project/page prompt recorded in the sheet.
+  // The project-wide portion may be represented by UXPilot as an attached
+  // document, while the current page instruction is typed into the composer.
+  const finalLogicalPrompt = projectContext
+    ? `${projectContext}\n\n${pageInstruction}`
+    : pageInstruction;
+
+  await setFinalPageInstruction(page, pageInstruction);
+  await waitForComposerUploads(page);
 
   if (onPromptReady) {
-    await onPromptReady(finalPrompt);
+    await onPromptReady(finalLogicalPrompt);
   }
 
-  await clickSendAndWaitForGeneration(
-    page,
-    "desktop generation"
-  );
+  await saveGenerationInputScreenshot(page);
+  await clickSendAndWait(page, "desktop generation");
 }
-
 
 export async function generateDesktop(
   page: Page,
@@ -331,80 +275,39 @@ export async function generateDesktop(
   onPromptReady?: (fullPrompt: string) => Promise<void>
 ): Promise<void> {
   log.info("Starting desktop generation...");
-
-
-  await retry(
-    () =>
-      attemptGenerateDesktop(
-        page,
-        prompt,
-        level,
-        onPromptReady
-      ),
-    {
-      retries: config.retries.generate,
-      label: "Generate Desktop",
-    }
-  );
-
-
+  // The initial project flow was stable before the page-specific changes.
+  // Keep one deterministic send attempt so a timeout after a real click cannot
+  // accidentally submit the same UXPilot request twice.
+  await attemptGenerateDesktop(page, prompt, level, onPromptReady);
   log.info("Desktop generation finished.");
 }
 
+const mobileSelectors = {
+  generateButton: (page: Page) => page.getByRole("button", { name: /generate|send/i }),
+  designSurface: (page: Page) =>
+    page.locator('[data-testid*="canvas" i], [data-testid*="design-surface" i], [class*="design-surface" i], [class*="canvas" i]').first(),
+  generateMobileOption: (page: Page) =>
+    page.getByRole("menuitem", { name: /mobile/i }).or(page.getByText(/generate mobile version/i)),
+};
 
-
-async function attemptGenerateMobile(
-  page: Page,
-  level: ProjectLevel
-): Promise<void> {
-  await selectors.designSurface(page).click();
-
-
-  await selectors.generateButton(page)
-    .first()
-    .click();
-
-
-  await selectors.generateMobileOption(page)
-    .first()
-    .click();
-
-
+async function attemptGenerateMobile(page: Page): Promise<void> {
+  await mobileSelectors.designSurface(page).click();
+  await mobileSelectors.generateButton(page).first().click();
+  await mobileSelectors.generateMobileOption(page).first().click();
   await waitForGenerationToFinish(
     page,
-    "mobile generation"
+    "mobile generation",
+    await getGeneratedLabelCount(page),
+    await getSourceCodeCount(page)
   );
 }
 
-
-export async function generateMobile(
-  page: Page,
-  level: ProjectLevel
-): Promise<void> {
+export async function generateMobile(page: Page, _level: ProjectLevel): Promise<void> {
   log.info("Starting mobile generation...");
-
-
   try {
-    await retry(
-      () =>
-        attemptGenerateMobile(
-          page,
-          level
-        ),
-      {
-        retries: config.retries.generate,
-        label: "Generate Mobile",
-      }
-    );
-
-
+    await attemptGenerateMobile(page);
     log.info("Mobile generation finished.");
-
   } catch (err) {
-    throw new MobileGenerateError(
-      err instanceof Error
-        ? err.message
-        : String(err)
-    );
+    throw new MobileGenerateError(err instanceof Error ? err.message : String(err));
   }
 }
