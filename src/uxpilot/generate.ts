@@ -257,6 +257,39 @@ async function clickGenerateAndWait(
   );
 }
 
+async function appendFinalPageInstructionToComposer(
+  page: Page,
+  text: string
+): Promise<void> {
+  const promptInput = await waitForPromptInput(page);
+  await promptInput.click({ position: { x: 40, y: 25 } });
+
+  const modifier = process.platform === "darwin" ? "Meta" : "Control";
+  await page.keyboard.press(`${modifier}+End`).catch(() => undefined);
+  await page.keyboard.insertText(text);
+
+  const normalizedText = text.replace(/\r\n/g, "\n").trim();
+  await waitUntil(
+    async () => {
+      const actual = (await promptInput
+        .evaluate((element) => {
+          const node = element as HTMLElement & { value?: string };
+          return typeof node.value === "string"
+            ? node.value
+            : node.innerText || node.textContent || "";
+        })
+        .catch(() => "")).replace(/\r\n/g, "\n").trim();
+
+      return actual.includes(normalizedText);
+    },
+    {
+      timeoutMs: 10000,
+      intervalMs: 200,
+      label: "UXPilot composer to contain the final page instruction",
+    }
+  );
+}
+
 async function attemptGenerateDesktop(
   page: Page,
   prompt: string,
@@ -265,9 +298,9 @@ async function attemptGenerateDesktop(
 ): Promise<void> {
   const projectContext = await getStoredProjectContext(page);
 
-  // Any project files/images attached to the composer must finish uploading
-  // before we touch the prompt or submit it. Otherwise UXPilot can silently
-  // ignore the attachment while the text is already being sent.
+  // The project-wide context is inserted during setupProjectContext(). If it is
+  // large, UXPilot automatically converts it into a document attachment. The
+  // attachment must finish uploading before the page-specific text is added.
   await waitForComposerUploads(page);
 
   const attachmentInstruction = [
@@ -276,61 +309,28 @@ async function attemptGenerateDesktop(
     "Please carefully review every attached file and consider ALL items, notes, explanations, requirements, visual references, and other information contained in the attached file(s). Do not ignore or skip any part of the attached file(s). Treat their contents as authoritative project references and apply all relevant details to the current page design.",
   ].join("\n");
 
-  const finalPromptBase = projectContext
-    ? [
-        projectContext,
-        "",
-        "CURRENT PAGE PROMPT:",
-        prompt,
-      ].join("\n")
-    : prompt;
+  const pageInstruction = [
+    "",
+    "CURRENT PAGE PROMPT:",
+    prompt,
+    attachmentInstruction,
+  ].join("\n");
 
-  const finalPrompt = `${finalPromptBase}${attachmentInstruction}`;
+  // Keep a canonical copy of the exact logical prompt that will be submitted:
+  // project context + current page prompt + attachment instruction. The
+  // project context itself may be represented in UXPilot as a document chip,
+  // while this page-specific block remains as text in the composer.
+  const finalPrompt = projectContext
+    ? [projectContext, pageInstruction].join("\n")
+    : prompt + attachmentInstruction;
 
-  const promptInput = await waitForPromptInput(page);
-
-  await promptInput.click({ position: { x: 40, y: 25 } });
-  await promptInput.fill(finalPrompt).catch(() => undefined);
-
-  const readPromptValue = async (): Promise<string> =>
-    promptInput
-      .evaluate((element) => {
-        const node = element as HTMLElement & { value?: string };
-        return typeof node.value === "string"
-          ? node.value
-          : node.innerText || node.textContent || "";
-      })
-      .catch(() => "");
-
-  const expectedPrompt = finalPrompt.replace(/\r\n/g, "\n");
-  const hasExpectedPrompt = async (): Promise<boolean> => {
-    const actual = (await readPromptValue()).replace(/\r\n/g, "\n");
-    return actual === expectedPrompt || actual.includes(expectedPrompt);
-  };
-
-  if (!(await hasExpectedPrompt())) {
-    log.warn("Generation composer fill() did not persist the full page prompt. Retrying with keyboard input...");
-    await promptInput.click({ position: { x: 40, y: 25 } });
-    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => undefined);
-    await page.keyboard.press("Backspace").catch(() => undefined);
-    await page.keyboard.insertText(finalPrompt);
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, 750));
-
-  await waitUntil(hasExpectedPrompt, {
-    timeoutMs: 15000,
-    intervalMs: 250,
-    label: "UXPilot generation composer to contain the full page prompt",
-  });
-
+  await appendFinalPageInstructionToComposer(page, pageInstruction);
 
   await saveGenerationInputScreenshot(page);
 
   if (onPromptReady) {
     await onPromptReady(finalPrompt);
   }
-
 
   await clickGenerateAndWait(
     page,
