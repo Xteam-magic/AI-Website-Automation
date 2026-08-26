@@ -429,11 +429,72 @@ async function uploadFileThroughComposer(page: Page, localPath: string): Promise
 }
 
 async function waitForComposerAttachment(page: Page): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 1200));
+  await waitForComposerUploads(page);
   await selectors.mainPromptInput(page).waitFor({
     state: "visible",
     timeout: 10000,
   });
+}
+
+/**
+ * UXPilot keeps the attachment chip in an "Uploading..." state after the
+ * browser file input has accepted the file. The file is not necessarily
+ * available to the composer immediately, so the workflow must wait for that
+ * state to disappear before it edits the prompt or starts generation.
+ */
+export async function waitForComposerUploads(page: Page): Promise<void> {
+  const uploadingText = page.getByText(/^\s*Uploading(?:\.{1,3})?\s*$/i);
+  const timeoutMs = Math.max(config.timeouts.imageUploadMs * 2, 60_000);
+
+  // Give UXPilot a moment to render the attachment state after the file input
+  // changes. Without this small grace period, a freshly-started upload can be
+  // missed because the "Uploading..." chip has not rendered yet.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  let uploadIndicatorAppeared = false;
+  try {
+    await waitUntil(
+      async () => {
+        const count = await uploadingText.count().catch(() => 0);
+        for (let i = 0; i < count; i++) {
+          if (await uploadingText.nth(i).isVisible().catch(() => false)) return true;
+        }
+        return false;
+      },
+      {
+        timeoutMs: 5_000,
+        intervalMs: 200,
+        label: "UXPilot composer upload indicator to appear",
+      }
+    );
+    uploadIndicatorAppeared = true;
+  } catch {
+    uploadIndicatorAppeared = false;
+  }
+
+  if (uploadIndicatorAppeared) {
+    await waitUntil(
+      async () => {
+        const count = await uploadingText.count().catch(() => 0);
+        for (let i = 0; i < count; i++) {
+          if (await uploadingText.nth(i).isVisible().catch(() => false)) return false;
+        }
+        return true;
+      },
+      {
+        timeoutMs,
+        intervalMs: 250,
+        label: "UXPilot composer attachments to finish uploading",
+      }
+    );
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  log.info(
+    uploadIndicatorAppeared
+      ? "All UXPilot composer attachments finished uploading."
+      : "No visible UXPilot upload indicator remained; continuing after attachment settle."
+  );
 }
 
 async function isVisible(locator: ReturnType<Page["locator"]>): Promise<boolean> {
@@ -837,6 +898,7 @@ export async function uploadSourceImages(
 
         if ((await fileInputs.count()) > 0) {
           await fileInputs.last().setInputFiles(localPath);
+          await waitForComposerUploads(page);
           return;
         }
 
@@ -847,6 +909,7 @@ export async function uploadSourceImages(
           trigger.click({ trial: true }).catch(() => undefined),
         ]);
         await fileChooser.setFiles(localPath);
+        await waitForComposerUploads(page);
       },
       {
         retries: config.retries.upload,
@@ -871,4 +934,5 @@ export async function setupProjectContext(
   await uploadLogo(page, row.logoUrl);
   await appendProjectContextToComposer(page, row);
   await uploadSourceImages(page, row.sourceImages);
+  await waitForComposerUploads(page);
 }
