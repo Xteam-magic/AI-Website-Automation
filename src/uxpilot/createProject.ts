@@ -443,58 +443,61 @@ async function waitForComposerAttachment(page: Page): Promise<void> {
  * state to disappear before it edits the prompt or starts generation.
  */
 export async function waitForComposerUploads(page: Page): Promise<void> {
-  const uploadingText = page.getByText(/^\s*Uploading(?:\.{1,3})?\s*$/i);
+  const indicators = [
+    page.getByText(/^\s*Uploading(?:\.{1,3})?\s*$/i),
+    page.getByRole("button", { name: /Uploading/i }),
+    page.locator('[aria-label*="uploading" i], [data-testid*="upload" i][aria-busy="true"]'),
+  ];
   const timeoutMs = Math.max(config.timeouts.imageUploadMs * 2, 60_000);
 
-  // Give UXPilot a moment to render the attachment state after the file input
-  // changes. Without this small grace period, a freshly-started upload can be
-  // missed because the "Uploading..." chip has not rendered yet.
+  const isUploadingVisible = async (): Promise<boolean> => {
+    for (const locator of indicators) {
+      const count = await locator.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        if (await locator.nth(i).isVisible().catch(() => false)) return true;
+      }
+    }
+    return false;
+  };
+
+  // The Uploading chip can render a few hundred milliseconds after setInputFiles.
+  // Give UXPilot enough time to expose it before checking completion.
   await new Promise((resolve) => setTimeout(resolve, 500));
 
-  let uploadIndicatorAppeared = false;
-  try {
-    await waitUntil(
-      async () => {
-        const count = await uploadingText.count().catch(() => 0);
-        for (let i = 0; i < count; i++) {
-          if (await uploadingText.nth(i).isVisible().catch(() => false)) return true;
-        }
-        return false;
-      },
-      {
-        timeoutMs: 5_000,
+  let uploadStarted = await isUploadingVisible();
+  if (!uploadStarted) {
+    try {
+      await waitUntil(isUploadingVisible, {
+        timeoutMs: 10_000,
         intervalMs: 200,
         label: "UXPilot composer upload indicator to appear",
-      }
-    );
-    uploadIndicatorAppeared = true;
-  } catch {
-    uploadIndicatorAppeared = false;
+      });
+      uploadStarted = true;
+    } catch {
+      uploadStarted = false;
+    }
   }
 
-  if (uploadIndicatorAppeared) {
+  if (uploadStarted) {
+    log.info("UXPilot composer upload detected. Waiting for upload to finish...");
     await waitUntil(
-      async () => {
-        const count = await uploadingText.count().catch(() => 0);
-        for (let i = 0; i < count; i++) {
-          if (await uploadingText.nth(i).isVisible().catch(() => false)) return false;
-        }
-        return true;
-      },
+      async () => !(await isUploadingVisible()),
       {
         timeoutMs,
         intervalMs: 250,
         label: "UXPilot composer attachments to finish uploading",
       }
     );
-  }
 
-  await new Promise((resolve) => setTimeout(resolve, 700));
-  log.info(
-    uploadIndicatorAppeared
-      ? "All UXPilot composer attachments finished uploading."
-      : "No visible UXPilot upload indicator remained; continuing after attachment settle."
-  );
+    // Allow the attachment chip/state to settle after the Uploading label disappears.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    log.info("UXPilot composer attachments finished uploading.");
+  } else {
+    // Even when UXPilot does not expose the Uploading text, give the attachment
+    // state a deterministic settling window instead of racing the composer.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    log.info("No visible UXPilot upload indicator found; continuing after attachment settle.");
+  }
 }
 
 async function isVisible(locator: ReturnType<Page["locator"]>): Promise<boolean> {
@@ -931,8 +934,16 @@ export async function setupProjectContext(
   await createProject(page, row);
   await selectModel(page, row.requiredProjectLevel);
   await addWebsiteLink(page, row.sourceLinks);
-  await uploadLogo(page, row.logoUrl);
+
+  // Keep the same proven order as the original working flow: put the full
+  // project context into the composer first, then attach reference assets.
+  // UXPilot may keep an attachment in an Uploading state and temporarily
+  // re-render the composer; waiting for upload while the context is being
+  // verified can make a valid fill look empty.
   await appendProjectContextToComposer(page, row);
+
+  // Attach all reference assets only after the project context is present.
+  await uploadLogo(page, row.logoUrl);
   await uploadSourceImages(page, row.sourceImages);
   await waitForComposerUploads(page);
 }
