@@ -7,6 +7,7 @@ import { logger } from "../logger/logger";
 import { retry } from "../helpers/retry";
 import { waitUntil } from "../helpers/wait";
 import { ProjectLevel, ProjectRow } from "../types";
+import { googleSheetService } from "../sheet/googleSheet";
 
 const log = logger.scope("UXPilot/CreateProject");
 
@@ -513,12 +514,44 @@ async function composerTextValue(page: Page): Promise<string> {
 }
 
 async function isComposerUploadBusy(page: Page): Promise<boolean> {
-  const text = await page.locator("body").innerText().catch(() => "");
-  const busyText = /\b(uploading|processing|preparing|converting)\b/i.test(text);
-  const busyNodes = await page.locator(
-    '[aria-label*="uploading" i], [aria-label*="processing" i], [data-testid*="uploading" i], [data-testid*="upload" i]'
-  ).count().catch(() => 0);
-  return busyText || busyNodes > 0;
+  // Do NOT inspect the whole body or generic [data-testid*=upload] nodes.
+  // UXPilot keeps permanent upload controls in the DOM, which would make a
+  // completed attachment look busy forever. Only visible, explicitly busy
+  // indicators are considered.
+  const busySelectors = [
+    '[aria-label*="uploading" i]',
+    '[aria-label*="processing" i]',
+    '[aria-label*="preparing" i]',
+    '[aria-label*="converting" i]',
+    '[data-testid*="uploading" i]',
+    '[data-testid*="processing" i]',
+    '[data-testid*="preparing" i]',
+    '[data-testid*="converting" i]',
+    '[role="progressbar"]',
+  ];
+
+  for (const selector of busySelectors) {
+    const nodes = page.locator(selector);
+    const count = await nodes.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      if (await nodes.nth(i).isVisible().catch(() => false)) {
+        return true;
+      }
+    }
+  }
+
+  const visibleBusyText = page
+    .locator('button, [role="status"], [role="alert"], [aria-live], div, span')
+    .filter({ hasText: /^(\s*)?(Uploading(?:\.\.\.)?|Processing(?:\.\.\.)?|Preparing(?:\.\.\.)?|Converting(?:\.\.\.)?)(\s*)?$/i });
+
+  const count = await visibleBusyText.count().catch(() => 0);
+  for (let i = 0; i < count; i++) {
+    if (await visibleBusyText.nth(i).isVisible().catch(() => false)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function hasComposerAttachment(page: Page): Promise<boolean> {
@@ -579,9 +612,17 @@ export async function waitForComposerUploads(page: Page): Promise<void> {
   throw new Error("Timed out waiting for UXPilot composer attachments to finish uploading/processing.");
 }
 
-async function tryWriteClipboardText(page: Page, text: string): Promise<boolean> {
+async function pasteProjectContext(page: Page, text: string): Promise<void> {
+  const input = selectors.mainPromptInput(page).first();
+  await input.waitFor({ state: "visible", timeout: 15_000 });
+
+  await input.click();
+  await input.press("Control+A").catch(() => undefined);
+  await input.press("Backspace").catch(() => undefined);
+
+  let pasted = false;
   try {
-    return await page.evaluate(async (value) => {
+    pasted = await page.evaluate(async (value) => {
       try {
         await navigator.clipboard.writeText(value);
         return true;
@@ -590,85 +631,79 @@ async function tryWriteClipboardText(page: Page, text: string): Promise<boolean>
       }
     }, text);
   } catch {
-    return false;
+    pasted = false;
   }
-}
 
-async function waitForProjectContextAttachmentOrText(
-  page: Page,
-  expectedText: string,
-  timeoutMs = 180_000
-): Promise<void> {
-  const started = Date.now();
+  log.info(`Pasting full project context into UXPilot composer (${text.length} chars)...`);
+  if (pasted) {
+    await input.press("Control+V").catch(() => undefined);
+  } else {
+    await input.fill(text);
+  }
+
+  // The large context is intentionally pasted only once. UXPilot may turn it
+  // into pasted-document.docx; re-writing the textarea while that conversion
+  // is in progress can cancel/reset the upload.
+  const startedAt = Date.now();
+  const deadline = startedAt + 180_000;
   let attachmentSeen = false;
-  let uploadSeen = false;
-  let lastLogAt = started;
+  let lastLogAt = startedAt;
 
-  while (Date.now() - started < timeoutMs) {
+  while (Date.now() < deadline) {
     attachmentSeen = attachmentSeen || await hasComposerAttachment(page);
-    uploadSeen = uploadSeen || await isComposerUploadBusy(page);
-
+    const busy = await isComposerUploadBusy(page);
     const current = await composerTextValue(page);
-    const textAccepted = current.trim() === expectedText.trim();
+    const textAccepted = current.trim() === text.trim();
 
-    if (attachmentSeen && !uploadSeen) {
-      // The document chip is present and no upload/processing state remains.
-      await page.waitForTimeout(1000);
-      if (!(await isComposerUploadBusy(page))) {
-        log.info("UXPilot project context document is uploaded and fully settled.");
-        return;
-      }
+    if (attachmentSeen) {
+      log.info("UXPilot converted the large project context into a document attachment; continuing without rewriting the composer.");
+      return;
     }
 
-    if (textAccepted && !uploadSeen) {
-      log.info("UXPilot project context remains as plain composer text and is ready.");
+    if (textAccepted && !busy) {
+      log.info("UXPilot retained the full project context as composer text.");
       return;
     }
 
     const now = Date.now();
     if (now - lastLogAt >= 10_000) {
       log.info(
-        `Waiting for UXPilot project-context paste to finish ` +
-        `(attachment=${attachmentSeen}, uploadBusy=${uploadSeen}, ` +
-        `textareaChars=${current.length})...`
+        `Waiting for UXPilot project-context paste to settle (attachment=${attachmentSeen}, uploadBusy=${busy}, textareaChars=${current.length})...`
       );
       lastLogAt = now;
     }
 
-    await page.waitForTimeout(750);
+    await page.waitForTimeout(500);
   }
 
   throw new Error(
-    "Timed out waiting for UXPilot to finish accepting the full project context after paste/upload."
+    "Timed out waiting for UXPilot to accept the full project context after the single paste operation."
   );
-}
-
-async function pasteProjectContext(
-  page: Page,
-  text: string
-): Promise<void> {
-  const input = selectors.mainPromptInput(page).first();
-  await input.waitFor({ state: "visible", timeout: 15_000 });
-  await input.click();
-  await input.press("Control+A").catch(() => undefined);
-  await input.press("Backspace").catch(() => undefined);
-
-  const clipboardReady = await tryWriteClipboardText(page, text);
-  if (clipboardReady) {
-    log.info(`Pasting full project context into UXPilot composer (${text.length} chars)...`);
-    await input.press("Control+V").catch(() => undefined);
-  } else {
-    log.warn("Browser clipboard API was unavailable; using UXPilot composer fill() as fallback.");
-    await input.fill(text);
-  }
-
-  // IMPORTANT: Do not re-fill/re-paste while UXPilot is converting a large
-  // input into pasted-document.docx. One paste must be allowed to finish.
-  await waitForProjectContextAttachmentOrText(page, text);
 }
 
 async function appendProjectContextToComposer(page: Page, row: ProjectRow): Promise<void> {
   const context = buildProjectPromptContext(row);
+
+  // Persist the exact project-level merged document BEFORE it is pasted into
+  // UXPilot. At the later page-generation stage this same Sheet column is
+  // updated again with the page-specific final logical prompt.
+  const promptHeader = row.headers.find((header) => {
+    const normalized = normalizeHeader(header);
+    return (
+      normalized === "full ux pilio project prompt" ||
+      normalized === "full uxpilot project prompt"
+    );
+  });
+
+  if (promptHeader) {
+    log.info("Saving the exact project-level UXPilot prompt to Google Sheet BEFORE pasting it into the main composer...");
+    await googleSheetService.updateColumnByHeader(
+      row.rowNumber,
+      promptHeader,
+      context
+    );
+    (row as ProjectRow & { fullUxPilotProjectPrompt?: string }).fullUxPilotProjectPrompt = context;
+  }
 
   await page.evaluate((value) => {
     (window as unknown as { __xmagicProjectPromptContext?: string }).__xmagicProjectPromptContext = value;
@@ -678,7 +713,7 @@ async function appendProjectContextToComposer(page: Page, row: ProjectRow): Prom
   await pasteProjectContext(page, context);
 
   log.info(
-    `Project context accepted by the UXPilot composer (${context.length} chars), with upload completion verified.`
+    `Project context accepted by the UXPilot composer (${context.length} chars), as text or an auto-converted document.`
   );
 }
 
@@ -900,5 +935,7 @@ export async function setupProjectContext(
   await uploadLogo(page, row.logoUrl);
   await appendProjectContextToComposer(page, row);
   await uploadSourceImages(page, row.sourceImages);
+  // All attachments must finish uploading before generation starts. The
+  // upload detector below only considers visible, explicit busy indicators.
   await waitForComposerUploads(page);
 }
