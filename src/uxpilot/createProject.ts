@@ -579,34 +579,92 @@ export async function waitForComposerUploads(page: Page): Promise<void> {
   throw new Error("Timed out waiting for UXPilot composer attachments to finish uploading/processing.");
 }
 
-async function setComposerText(page: Page, text: string): Promise<boolean> {
-  let prompt = selectors.mainPromptInput(page).first();
-  await prompt.waitFor({ state: "visible", timeout: 15_000 });
-  await prompt.click().catch(() => undefined);
-  await prompt.fill(text).catch(() => undefined);
+async function tryWriteClipboardText(page: Page, text: string): Promise<boolean> {
+  try {
+    return await page.evaluate(async (value) => {
+      try {
+        await navigator.clipboard.writeText(value);
+        return true;
+      } catch {
+        return false;
+      }
+    }, text);
+  } catch {
+    return false;
+  }
+}
 
-  let actual = await composerTextValue(page);
-  if (actual.trim() === text.trim()) return true;
+async function waitForProjectContextAttachmentOrText(
+  page: Page,
+  expectedText: string,
+  timeoutMs = 180_000
+): Promise<void> {
+  const started = Date.now();
+  let attachmentSeen = false;
+  let uploadSeen = false;
+  let lastLogAt = started;
 
-  await prompt.evaluate((element, value) => {
-    const textarea = element as HTMLTextAreaElement;
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    setter?.call(textarea, value);
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    textarea.dispatchEvent(new Event("change", { bubbles: true }));
-  }, text).catch(() => undefined);
+  while (Date.now() - started < timeoutMs) {
+    attachmentSeen = attachmentSeen || await hasComposerAttachment(page);
+    uploadSeen = uploadSeen || await isComposerUploadBusy(page);
 
-  actual = await composerTextValue(page);
-  if (actual.trim() === text.trim()) return true;
+    const current = await composerTextValue(page);
+    const textAccepted = current.trim() === expectedText.trim();
 
-  prompt = selectors.mainPromptInput(page).first();
-  await prompt.click().catch(() => undefined);
-  await prompt.press("Control+A").catch(() => undefined);
-  await prompt.press("Backspace").catch(() => undefined);
-  await page.keyboard.insertText(text).catch(() => undefined);
+    if (attachmentSeen && !uploadSeen) {
+      // The document chip is present and no upload/processing state remains.
+      await page.waitForTimeout(1000);
+      if (!(await isComposerUploadBusy(page))) {
+        log.info("UXPilot project context document is uploaded and fully settled.");
+        return;
+      }
+    }
 
-  actual = await composerTextValue(page);
-  return actual.trim() === text.trim();
+    if (textAccepted && !uploadSeen) {
+      log.info("UXPilot project context remains as plain composer text and is ready.");
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastLogAt >= 10_000) {
+      log.info(
+        `Waiting for UXPilot project-context paste to finish ` +
+        `(attachment=${attachmentSeen}, uploadBusy=${uploadSeen}, ` +
+        `textareaChars=${current.length})...`
+      );
+      lastLogAt = now;
+    }
+
+    await page.waitForTimeout(750);
+  }
+
+  throw new Error(
+    "Timed out waiting for UXPilot to finish accepting the full project context after paste/upload."
+  );
+}
+
+async function pasteProjectContext(
+  page: Page,
+  text: string
+): Promise<void> {
+  const input = selectors.mainPromptInput(page).first();
+  await input.waitFor({ state: "visible", timeout: 15_000 });
+  await input.click();
+  await input.press("Control+A").catch(() => undefined);
+  await input.press("Backspace").catch(() => undefined);
+
+  const clipboardReady = await tryWriteClipboardText(page, text);
+  if (clipboardReady) {
+    log.info(`Pasting full project context into UXPilot composer (${text.length} chars)...`);
+    await input.press("Control+V").catch(() => undefined);
+  } else {
+    log.warn("Browser clipboard API was unavailable; using UXPilot composer fill() as fallback.");
+    await input.fill(text);
+  }
+
+  // IMPORTANT: Do not re-fill/re-paste while UXPilot is converting a large
+  // input into pasted-document.docx. One paste must be allowed to finish.
+  await waitForProjectContextAttachmentOrText(page, text);
 }
 
 async function appendProjectContextToComposer(page: Page, row: ProjectRow): Promise<void> {
@@ -617,42 +675,10 @@ async function appendProjectContextToComposer(page: Page, row: ProjectRow): Prom
   }, context);
 
   await closeModelPicker(page);
+  await pasteProjectContext(page, context);
 
-  const prompt = selectors.mainPromptInput(page).first();
-  await prompt.waitFor({ state: "visible", timeout: 15_000 });
-
-  const inserted = await setComposerText(page, context);
-  if (!inserted) {
-    // Large contexts are expected to be auto-converted by UXPilot into a
-    // document attachment. Do not keep rewriting the composer while that
-    // conversion is happening.
-    log.info("Full project context was not retained as textarea text; waiting for UXPilot auto-converted document attachment.");
-  }
-
-  // Do not wait for the upload to finish here. Large project context is
-  // auto-converted by UXPilot into a document attachment, and that upload can
-  // remain in an "Uploading..." state for an extended period. The next phase
-  // (generate.ts) is responsible for waiting until that upload is fully
-  // settled before adding the final page instruction and pressing Send.
-  const acceptanceDeadline = Date.now() + 60_000;
-  while (Date.now() < acceptanceDeadline) {
-    const currentText = await composerTextValue(page);
-    const attachmentPresent = await hasComposerAttachment(page);
-
-    if (attachmentPresent || currentText.trim() === context.trim()) {
-      log.info(
-        attachmentPresent
-          ? `Project context was accepted by UXPilot as an attachment (${context.length} chars). Waiting for upload completion in the generation phase.`
-          : `Project context was accepted directly in the UXPilot composer (${context.length} chars).`
-      );
-      return;
-    }
-
-    await page.waitForTimeout(500);
-  }
-
-  throw new Error(
-    "Timed out waiting for UXPilot to accept the project context as text or an auto-converted document attachment."
+  log.info(
+    `Project context accepted by the UXPilot composer (${context.length} chars), with upload completion verified.`
   );
 }
 
