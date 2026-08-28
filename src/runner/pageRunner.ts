@@ -10,7 +10,7 @@ import {
   generateMobile,
   MobileGenerateError,
 } from "../uxpilot/generate";
-import { copyAsHtml, copyToFigma } from "../uxpilot/export";
+import { copyAsHtml } from "../uxpilot/export";
 import { pasteIntoFigma } from "../figma/paste";
 import { convertHtmlToElementor } from "../elementor/convert";
 import {
@@ -35,6 +35,8 @@ export interface RunPageParams {
   isEditRun: boolean;
   /** Combined edit instructions for this page — only set when isEditRun is true. */
   editsText?: string;
+  /** Normal project runs defer Figma until all pages have exported HTML. */
+  skipFigma?: boolean;
 }
 
 function estimatedMinutesForLevel(level: ProjectLevel): number {
@@ -59,15 +61,15 @@ function saveHtmlToDisk(
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  const filePath = path.join(dir, "index.html");
+  // Keep index.html for the existing GitHub Pages structure and also create
+  // the requested exact page-named HTML file for direct download.
+  const indexPath = path.join(dir, "index.html");
+  const exactPagePath = path.join(dir, `${pageName}.html`);
 
-  fs.writeFileSync(
-    filePath,
-    html,
-    "utf-8"
-  );
+  fs.writeFileSync(indexPath, html, "utf-8");
+  fs.writeFileSync(exactPagePath, html, "utf-8");
 
-  return filePath;
+  return exactPagePath;
 }
 
 function readFullLogs(): string {
@@ -98,6 +100,20 @@ function buildHtmlPublicUrl(
   );
 }
 
+
+function buildHtmlDownloadUrl(
+  projectId: string,
+  pageName: string
+): string {
+  const encodedProjectId = encodeURIComponent(projectId);
+  const encodedPageName = encodeURIComponent(pageName);
+
+  return (
+    `https://xteam-magic.github.io/AI-Website-Automation/` +
+    `${encodedProjectId}/${encodedPageName}/${encodedPageName}.html`
+  );
+}
+
 function buildJsonPublicUrl(
   projectId: string,
   pageName: string
@@ -113,8 +129,9 @@ function buildJsonPublicUrl(
 
 /**
  * Runs the full per-page pipeline: build prompt -> generate desktop
- * -> generate mobile (if requested) -> export HTML -> Figma (if requested)
- * -> Elementor (if requested) -> email -> sheet update.
+ * -> generate mobile (if requested) -> publish/capture HTML -> Elementor (if requested)
+ * -> email -> sheet update. Figma is intentionally deferred until every
+ * page has completed its HTML export so the Figma phase can run in page order.
  *
  * Project-level setup (login, create project, model, website, images) has
  * already happened before this is ever called — see projectRunner.ts.
@@ -130,6 +147,7 @@ export async function runPage(
     totalPages,
     isEditRun,
     editsText,
+    skipFigma = false,
   } = params;
 
   const { page, context } = session;
@@ -256,7 +274,11 @@ export async function runPage(
 
   pageLog.info("Copying HTML...");
 
-  const html = await copyAsHtml(page);
+  const exportedHtml = await copyAsHtml(
+    page,
+    pageSpec.page
+  );
+  const html = exportedHtml.html;
 
   const htmlFilePath = saveHtmlToDisk(
     row.projectId,
@@ -264,30 +286,27 @@ export async function runPage(
     html
   );
 
-  const htmlPublicUrl = buildHtmlPublicUrl(
+  const htmlPublicUrl = exportedHtml.publishedUrl;
+  const htmlDownloadUrl = buildHtmlDownloadUrl(
     row.projectId,
     pageSpec.page
   );
 
-  const htmlEntry =
-    `${pageSpec.page}: ${htmlPublicUrl}`;
+  const htmlBlock = [
+    `لینک مستقیم صفحه ی ${pageSpec.page} : ${htmlPublicUrl}`,
+    `لینک دانلود html صفحه ی ${pageSpec.page} : ${htmlDownloadUrl}`,
+  ].join("\n");
 
-  const existingHtml =
-    row.htmlFile?.trim() || "";
-
-  const htmlLines = existingHtml
-    ? existingHtml
-        .split(/\r?\n/)
-        .filter(
-          (line) =>
-            !line.startsWith(
-              `${pageSpec.page}: `
-            )
-        )
+  const existingHtml = row.htmlFile?.trim() || "";
+  const blocks = existingHtml
+    ? existingHtml.split(/\n-{3,}\n|\r?\n\r?\n/).filter(Boolean)
     : [];
 
-  const htmlValue =
-    [...htmlLines, htmlEntry].join("\n");
+  const filteredBlocks = blocks.filter(
+    (block) => !block.includes(`صفحه ی ${pageSpec.page} :`) && !block.includes(`صفحه ی ${pageSpec.page} : `) && !block.includes(`لینک مستقیم صفحه ی ${pageSpec.page} `)
+  );
+
+  const htmlValue = [...filteredBlocks, htmlBlock].join("\n------------------------------\n");
 
   await googleSheetService.updateRow(
     row.rowNumber,
@@ -305,7 +324,7 @@ export async function runPage(
     }
   );
 
-  if (row.figmaNeeded === "Yes") {
+  if (!skipFigma && row.figmaNeeded === "Yes") {
     await googleSheetService.updateRow(
       row.rowNumber,
       {
@@ -313,7 +332,10 @@ export async function runPage(
       }
     );
 
-    await copyToFigma(page);
+    // Edit runs retain their original per-page Figma behavior. New/start
+    // runs pass skipFigma=true and perform the Figma phase after all pages.
+    const { copyToFigma } = await import("../uxpilot/export");
+    await copyToFigma(page, pageSpec.page);
 
     await googleSheetService.updateRow(
       row.rowNumber,
