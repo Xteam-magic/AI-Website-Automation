@@ -917,70 +917,95 @@ async function publishAndCaptureRawHtml(
   await globeButton.click();
   log.info("Globe/publish button clicked. Waiting for Publish Settings...");
 
-  const publishHeading = page.getByText(/^Publish Settings$/i).first();
-  await publishHeading.waitFor({ state: "visible", timeout: 10_000 });
+  const publishDialog = page.getByRole("dialog").filter({
+    hasText: /Publish Settings/i,
+  }).last();
+  await publishDialog.waitFor({ state: "visible", timeout: 15_000 });
 
-  const statusPublished = page.getByText(/^Published$/i).first();
-  const statusNotPublished = page.getByText(/^Not published$/i).first();
+  // The status and action controls must be resolved inside the active
+  // Publish Settings dialog. UXPilot can retain hidden/previous dialog
+  // elements elsewhere in the DOM.
+  const dialogStatus = await publishDialog.innerText().catch(() => "");
+  let isPublished = /(^|\n)\s*Published\s*($|\n)/i.test(dialogStatus) &&
+    !/(^|\n)\s*Not published\s*($|\n)/i.test(dialogStatus);
 
-  if (await statusNotPublished.isVisible().catch(() => false)) {
-    const publishButton = page.getByRole("button", { name: /^Publish$/i }).last();
-    await publishButton.waitFor({ state: "visible", timeout: 10_000 });
+  if (!isPublished) {
+    // Resolve the Publish button strictly inside the active Publish Settings
+    // dialog. This avoids stale/hidden dialogs elsewhere in the DOM.
+    const publishButton = publishDialog.getByRole("button", {
+      name: /^Publish$/i,
+    }).last();
+
+    await publishButton.waitFor({ state: "visible", timeout: 15_000 });
+    await waitUntil(
+      async () => await publishButton.isEnabled().catch(() => false),
+      {
+        timeoutMs: 10_000,
+        intervalMs: 250,
+        label: `Publish button enabled for ${pageName}`,
+      }
+    );
+
     await publishButton.click();
     log.info(`Publishing "${pageName}"...`);
 
     await waitUntil(
-      async () => await statusPublished.isVisible().catch(() => false),
+      async () => {
+        const text = await publishDialog.innerText().catch(() => "");
+        return /(^|\n)\s*Published\s*($|\n)/i.test(text) &&
+          !/(^|\n)\s*Not published\s*($|\n)/i.test(text);
+      },
       {
         timeoutMs: 60_000,
         intervalMs: 500,
-        label: "published status",
+        label: `published status for ${pageName}`,
       }
     );
+
+    isPublished = true;
+    log.info(`"${pageName}" is now Published.`);
   } else {
-    await waitUntil(
-      async () =>
-        (await statusPublished.isVisible().catch(() => false)) ||
-        (await statusNotPublished.isVisible().catch(() => false)),
-      {
-        timeoutMs: 10_000,
-        intervalMs: 250,
-        label: "publish status",
-      }
-    );
+    log.info(`"${pageName}" is already Published; skipping Publish.`);
   }
 
-  if (!(await statusPublished.isVisible().catch(() => false))) {
-    throw new Error(`UXPilot page "${pageName}" is not published.`);
-  }
-
-  const copyLinkButton = page.locator('button[title="Copy Link"]:visible').last();
+  const copyLinkButton = publishDialog.locator(
+    'button[title="Copy Link"]:visible'
+  ).last();
   await copyLinkButton.waitFor({ state: "visible", timeout: 10_000 });
+  await waitUntil(
+    async () => await copyLinkButton.isEnabled().catch(() => false),
+    {
+      timeoutMs: 10_000,
+      intervalMs: 250,
+      label: `Copy Link button enabled for ${pageName}`,
+    }
+  );
 
-  let publishedUrl = "";
-
-  publishedUrl = await page.evaluate(() => {
+  let publishedUrl = await publishDialog.evaluate(() => {
     const visible = (el: Element) => {
       const h = el as HTMLElement;
       const r = h.getBoundingClientRect();
       const s = window.getComputedStyle(h);
       return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden";
     };
-    const values = Array.from(document.querySelectorAll("input"))
+
+    return Array.from(document.querySelectorAll("input"))
       .filter(visible)
       .map((input) => (input as HTMLInputElement).value.trim())
-      .filter((value) => /^https?:\/\//i.test(value));
-    return values[values.length - 1] || "";
+      .filter((value) => /^https?:\/\//i.test(value))
+      .pop() || "";
   });
 
   await copyLinkButton.click();
 
   if (!publishedUrl) {
-    try {
-      publishedUrl = await page.evaluate(async () => navigator.clipboard.readText());
-    } catch {
-      publishedUrl = "";
-    }
+    publishedUrl = await page.evaluate(async () => {
+      try {
+        return (await navigator.clipboard.readText()).trim();
+      } catch {
+        return "";
+      }
+    });
   }
 
   publishedUrl = publishedUrl.trim();
@@ -990,13 +1015,25 @@ async function publishAndCaptureRawHtml(
 
   log.info(`Published URL for "${pageName}": ${publishedUrl}`);
 
-  // Close the publish dialog before opening the published URL in a separate tab.
-  const closeButton = page.locator(
+  // Close the active Publish Settings dialog before opening the public page.
+  const dialogCloseButton = publishDialog.locator(
     'button:has(svg.lucide-x):visible'
   ).last();
-  if (await closeButton.count()) {
-    await closeButton.click().catch(() => undefined);
+
+  if (await dialogCloseButton.count()) {
+    await dialogCloseButton.click().catch(() => undefined);
+  } else {
+    await page.keyboard.press("Escape").catch(() => undefined);
   }
+
+  await waitUntil(
+    async () => !(await publishDialog.isVisible().catch(() => false)),
+    {
+      timeoutMs: 5_000,
+      intervalMs: 250,
+      label: "Publish Settings dialog to close",
+    }
+  );
 
   const sourcePage = await page.context().newPage();
   try {
@@ -1007,9 +1044,9 @@ async function publishAndCaptureRawHtml(
     await sourcePage.waitForLoadState("networkidle").catch(() => undefined);
     await sourcePage.waitForTimeout(1_000);
 
-    // Browser menus (right-click -> View page source) are outside Playwright's
-    // page DOM. The browser's exact equivalent is the view-source: URL, which
-    // opens the same raw source document without depending on Chrome UI menus.
+    // Chrome's context-menu "View page source" is browser chrome and cannot
+    // be clicked through Playwright. view-source: is its exact navigation
+    // equivalent and exposes the complete raw source document.
     await sourcePage.goto(`view-source:${publishedUrl}`, {
       waitUntil: "domcontentloaded",
       timeout: 60_000,
