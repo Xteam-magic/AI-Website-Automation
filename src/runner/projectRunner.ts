@@ -5,6 +5,8 @@ import { logger } from "../logger/logger";
 import { config } from "../config/config";
 import { login } from "../uxpilot/login";
 import { setupProjectContext } from "../uxpilot/createProject";
+import { copyToFigma } from "../uxpilot/export";
+import { pasteIntoFigma } from "../figma/paste";
 import { openExistingProject, tryOpenExistingProject } from "../uxpilot/editProject";
 import { captureErrorScreenshot } from "../helpers/screenshot";
 import {
@@ -149,6 +151,53 @@ async function runAllPages(
       pageIndex: i + 1,
       totalPages: pages.length,
       isEditRun: false,
+      skipFigma: true,
+    });
+  }
+}
+
+/**
+ * Runs the deferred Figma phase strictly after every page has completed its
+ * HTML publish/source capture (and any optional Elementor conversion).
+ */
+async function runAllPagesToFigma(
+  session: BrowserSession,
+  row: ProjectRow,
+  startFromPageName?: string
+): Promise<void> {
+  if (row.figmaNeeded !== "Yes") return;
+
+  const pages = row.pages;
+  const startIndex = startFromPageName
+    ? Math.max(
+        0,
+        pages.findIndex(
+          (p) => p.page.toLowerCase() === startFromPageName.toLowerCase()
+        )
+      )
+    : 0;
+
+  for (let i = startIndex; i < pages.length; i++) {
+    const pageSpec = pages[i];
+
+    await googleSheetService.updateRow(row.rowNumber, {
+      status: "Waiting Export",
+      currentStep: "Copy To Figma",
+      currentPage: pageSpec.page,
+    });
+
+    log.info(`[Page:${pageSpec.page}] Copying design to Figma...`);
+    await copyToFigma(session.page, pageSpec.page);
+
+    await googleSheetService.updateRow(row.rowNumber, {
+      currentStep: "Paste Figma",
+      currentPage: pageSpec.page,
+    });
+
+    await pasteIntoFigma(session.context, {
+      projectName: row.projectName,
+      pageName: pageSpec.page,
+      pageIndex: i,
     });
   }
 }
@@ -316,6 +365,12 @@ export async function runProject(
         row,
         mode === "resume" ? row.currentPage || undefined : undefined
       );
+
+      await runAllPagesToFigma(
+        session,
+        row,
+        mode === "resume" ? row.currentPage || undefined : undefined
+      );
     } else {
       currentStep = "Open Project";
       await googleSheetService.updateRow(
@@ -330,6 +385,12 @@ export async function runProject(
 
       currentStep = "Generate Desktop";
       await runAllPages(
+        session,
+        row,
+        row.currentPage || undefined
+      );
+
+      await runAllPagesToFigma(
         session,
         row,
         row.currentPage || undefined
