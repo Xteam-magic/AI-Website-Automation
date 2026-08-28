@@ -7,7 +7,6 @@ import { logger } from "../logger/logger";
 import { retry } from "../helpers/retry";
 import { waitUntil } from "../helpers/wait";
 import { ProjectLevel, ProjectRow } from "../types";
-import { googleSheetService } from "../sheet/googleSheet";
 
 const log = logger.scope("UXPilot/CreateProject");
 
@@ -208,15 +207,6 @@ function collectAdditionalDesignContext(row: ProjectRow): Array<[string, string]
     "edit after design",
   ];
 
-  // Explicit implementation/debug columns that must never enter UXPilot
-  // visual-design context, even when they are otherwise unknown headers.
-  const excludedExactDesignHeaders = new Set([
-    "feature",
-    "plugin",
-    "debug",
-    "edit",
-  ]);
-
   const designTokens = [
     "content",
     "copy",
@@ -263,7 +253,6 @@ function collectAdditionalDesignContext(row: ProjectRow): Array<[string, string]
   for (const [header, rawValue] of Object.entries(rawColumns)) {
     const normalized = normalizeHeader(header);
     if (!normalized || knownHeaders.has(normalized)) continue;
-    if (excludedExactDesignHeaders.has(normalized)) continue;
     if (excludedTokens.some((token) => normalized.includes(token))) continue;
     if (!designTokens.some((token) => normalized.includes(token))) continue;
 
@@ -284,7 +273,15 @@ export function buildProjectPromptContext(row: ProjectRow): string {
   const fullProjectDoc = formatField(
     readField(row, ["fullProjectDoc", "Full Project Doc", "full_project_doc"])
   );
-  const pages = formatField(readField(row, ["pages", "Pages"]));
+  const pageSpecs = Array.isArray(row.pages) ? row.pages : [];
+  const pagesSummary = pageSpecs.length
+    ? pageSpecs.map((pageSpec, index) => {
+        const name = String(pageSpec?.page ?? "").trim();
+        const priority = pageSpec?.priority != null ? `priority=${pageSpec.priority}` : "";
+        const status = String(pageSpec?.status ?? "").trim();
+        return `${index + 1}. ${name}${priority ? ` (${priority}${status ? `, status=${status}` : ""})` : status ? ` (status=${status})` : ""}`;
+      }).join("\n")
+    : "(empty)";
   const fonts = formatField(readField(row, ["fonts", "font", "Fonts", "Font"]));
   const language = formatField(readField(row, ["language", "Language"]));
   const aiSuggestions = formatField(
@@ -310,7 +307,7 @@ export function buildProjectPromptContext(row: ProjectRow): string {
     ["BRAND DESCRIPTION", formatField(readField(row, ["brandDescription", "Brand Description"]))],
     ["STATIC CONTENT", staticContent],
     ["COLOR PALETTE", formatField(readField(row, ["colorPalette", "Color Palette"]))],
-    ["PAGES", pages],
+    ["PAGES", pagesSummary],
     ["COUNT PAGE", formatField(readField(row, ["countPage", "Count Page"]))],
     ["FONTS", fonts],
     ["LANGUAGE", language],
@@ -524,44 +521,12 @@ async function composerTextValue(page: Page): Promise<string> {
 }
 
 async function isComposerUploadBusy(page: Page): Promise<boolean> {
-  // Do NOT inspect the whole body or generic [data-testid*=upload] nodes.
-  // UXPilot keeps permanent upload controls in the DOM, which would make a
-  // completed attachment look busy forever. Only visible, explicitly busy
-  // indicators are considered.
-  const busySelectors = [
-    '[aria-label*="uploading" i]',
-    '[aria-label*="processing" i]',
-    '[aria-label*="preparing" i]',
-    '[aria-label*="converting" i]',
-    '[data-testid*="uploading" i]',
-    '[data-testid*="processing" i]',
-    '[data-testid*="preparing" i]',
-    '[data-testid*="converting" i]',
-    '[role="progressbar"]',
-  ];
-
-  for (const selector of busySelectors) {
-    const nodes = page.locator(selector);
-    const count = await nodes.count().catch(() => 0);
-    for (let i = 0; i < count; i++) {
-      if (await nodes.nth(i).isVisible().catch(() => false)) {
-        return true;
-      }
-    }
-  }
-
-  const visibleBusyText = page
-    .locator('button, [role="status"], [role="alert"], [aria-live], div, span')
-    .filter({ hasText: /^(\s*)?(Uploading(?:\.\.\.)?|Processing(?:\.\.\.)?|Preparing(?:\.\.\.)?|Converting(?:\.\.\.)?)(\s*)?$/i });
-
-  const count = await visibleBusyText.count().catch(() => 0);
-  for (let i = 0; i < count; i++) {
-    if (await visibleBusyText.nth(i).isVisible().catch(() => false)) {
-      return true;
-    }
-  }
-
-  return false;
+  const text = await page.locator("body").innerText().catch(() => "");
+  const busyText = /\b(uploading|processing|preparing|converting)\b/i.test(text);
+  const busyNodes = await page.locator(
+    '[aria-label*="uploading" i], [aria-label*="processing" i], [data-testid*="uploading" i], [data-testid*="upload" i]'
+  ).count().catch(() => 0);
+  return busyText || busyNodes > 0;
 }
 
 async function hasComposerAttachment(page: Page): Promise<boolean> {
@@ -622,105 +587,63 @@ export async function waitForComposerUploads(page: Page): Promise<void> {
   throw new Error("Timed out waiting for UXPilot composer attachments to finish uploading/processing.");
 }
 
-async function pasteProjectContext(page: Page, text: string): Promise<void> {
-  const input = selectors.mainPromptInput(page).first();
-  await input.waitFor({ state: "visible", timeout: 15_000 });
+async function setComposerText(page: Page, text: string): Promise<boolean> {
+  let prompt = selectors.mainPromptInput(page).first();
+  await prompt.waitFor({ state: "visible", timeout: 15_000 });
+  await prompt.click().catch(() => undefined);
+  await prompt.fill(text).catch(() => undefined);
 
-  await input.click();
-  await input.press("Control+A").catch(() => undefined);
-  await input.press("Backspace").catch(() => undefined);
+  let actual = await composerTextValue(page);
+  if (actual.trim() === text.trim()) return true;
 
-  let pasted = false;
-  try {
-    pasted = await page.evaluate(async (value) => {
-      try {
-        await navigator.clipboard.writeText(value);
-        return true;
-      } catch {
-        return false;
-      }
-    }, text);
-  } catch {
-    pasted = false;
-  }
+  await prompt.evaluate((element, value) => {
+    const textarea = element as HTMLTextAreaElement;
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    setter?.call(textarea, value);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.dispatchEvent(new Event("change", { bubbles: true }));
+  }, text).catch(() => undefined);
 
-  log.info(`Pasting full project context into UXPilot composer (${text.length} chars)...`);
-  if (pasted) {
-    await input.press("Control+V").catch(() => undefined);
-  } else {
-    await input.fill(text);
-  }
+  actual = await composerTextValue(page);
+  if (actual.trim() === text.trim()) return true;
 
-  // The large context is intentionally pasted only once. UXPilot may turn it
-  // into pasted-document.docx; re-writing the textarea while that conversion
-  // is in progress can cancel/reset the upload.
-  const startedAt = Date.now();
-  const deadline = startedAt + 180_000;
-  let attachmentSeen = false;
-  let lastLogAt = startedAt;
+  prompt = selectors.mainPromptInput(page).first();
+  await prompt.click().catch(() => undefined);
+  await prompt.press("Control+A").catch(() => undefined);
+  await prompt.press("Backspace").catch(() => undefined);
+  await page.keyboard.insertText(text).catch(() => undefined);
 
-  while (Date.now() < deadline) {
-    attachmentSeen = attachmentSeen || await hasComposerAttachment(page);
-    const busy = await isComposerUploadBusy(page);
-    const current = await composerTextValue(page);
-    const textAccepted = current.trim() === text.trim();
-
-    if (attachmentSeen) {
-      log.info("UXPilot converted the large project context into a document attachment; continuing without rewriting the composer.");
-      return;
-    }
-
-    if (textAccepted && !busy) {
-      log.info("UXPilot retained the full project context as composer text.");
-      return;
-    }
-
-    const now = Date.now();
-    if (now - lastLogAt >= 10_000) {
-      log.info(
-        `Waiting for UXPilot project-context paste to settle (attachment=${attachmentSeen}, uploadBusy=${busy}, textareaChars=${current.length})...`
-      );
-      lastLogAt = now;
-    }
-
-    await page.waitForTimeout(500);
-  }
-
-  throw new Error(
-    "Timed out waiting for UXPilot to accept the full project context after the single paste operation."
-  );
+  actual = await composerTextValue(page);
+  return actual.trim() === text.trim();
 }
 
 async function appendProjectContextToComposer(page: Page, row: ProjectRow): Promise<void> {
   const context = buildProjectPromptContext(row);
-
-  // Persist the exact project-level merged document BEFORE it is pasted into
-  // UXPilot. At the later page-generation stage this same Sheet column is
-  // updated again with the page-specific final logical prompt.
-  const promptHeader = row.headers.find((header) => {
-    const normalized = normalizeHeader(header);
-    return (
-      normalized === "full ux pilio project prompt" ||
-      normalized === "full uxpilot project prompt"
-    );
-  });
-
-  if (promptHeader) {
-    log.info("Saving the exact project-level UXPilot prompt to Google Sheet BEFORE pasting it into the main composer...");
-    await googleSheetService.updateColumnByHeader(
-      row.rowNumber,
-      promptHeader,
-      context
-    );
-    (row as ProjectRow & { fullUxPilotProjectPrompt?: string }).fullUxPilotProjectPrompt = context;
-  }
 
   await page.evaluate((value) => {
     (window as unknown as { __xmagicProjectPromptContext?: string }).__xmagicProjectPromptContext = value;
   }, context);
 
   await closeModelPicker(page);
-  await pasteProjectContext(page, context);
+
+  const prompt = selectors.mainPromptInput(page).first();
+  await prompt.waitFor({ state: "visible", timeout: 15_000 });
+
+  const inserted = await setComposerText(page, context);
+  if (!inserted) {
+    // Large contexts are expected to be auto-converted by UXPilot into a
+    // document attachment. Do not keep rewriting the composer while that
+    // conversion is happening.
+    log.info("Full project context was not retained as textarea text; waiting for UXPilot auto-converted document attachment.");
+  }
+
+  await waitForComposerUploads(page);
+
+  const currentText = await composerTextValue(page);
+  const attachmentPresent = await hasComposerAttachment(page);
+  if (!attachmentPresent && currentText.trim() !== context.trim()) {
+    throw new Error("UXPilot project context was neither retained in the composer nor converted into an attachment.");
+  }
 
   log.info(
     `Project context accepted by the UXPilot composer (${context.length} chars), as text or an auto-converted document.`
@@ -945,7 +868,5 @@ export async function setupProjectContext(
   await uploadLogo(page, row.logoUrl);
   await appendProjectContextToComposer(page, row);
   await uploadSourceImages(page, row.sourceImages);
-  // All attachments must finish uploading before generation starts. The
-  // upload detector below only considers visible, explicit busy indicators.
   await waitForComposerUploads(page);
 }
