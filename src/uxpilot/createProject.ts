@@ -278,7 +278,7 @@ export function buildProjectPromptContext(row: ProjectRow): string {
     ? pageSpecs.map((pageSpec, index) => {
         const name = String(pageSpec?.page ?? "").trim();
         const priority = pageSpec?.priority != null ? `priority=${pageSpec.priority}` : "";
-        const status = String(pageSpec?.status ?? "").trim();
+        const status = String(pageSpec?.pageStatus ?? "").trim();
         return `${index + 1}. ${name}${priority ? ` (${priority}${status ? `, status=${status}` : ""})` : status ? ` (status=${status})` : ""}`;
       }).join("\n")
     : "(empty)";
