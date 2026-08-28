@@ -163,7 +163,8 @@ export async function runPage(
     designSystem: row.designSystem,
     fullProjectDoc: row.fullProjectDoc,
     pageName: pageSpec.page,
-    pageDescription: pageSpec.prompt?.trim() || pageSpec.description,
+    pageDescription: pageSpec.description,
+    pagePrompt: pageSpec.prompt,
     pageIndex,
     totalPages,
     edits: editsText,
@@ -180,9 +181,11 @@ export async function runPage(
     prompt,
     row.requiredProjectLevel,
     async (fullPrompt) => {
-      // Keep the sheet column as the exact merged prompt for the page being
-      // processed now. Previous pages must not leak into the current page
-      // prompt, so the next page replaces this value.
+      // Store exactly the final logical prompt for the CURRENT page.
+      // The project-wide context intentionally excludes page prompts; this
+      // prevents later pages from inheriting or duplicating earlier prompts.
+      const fullProjectPrompt = fullPrompt.trim();
+
       const promptHeaderName = row.headers.find((header) => {
         const n = header
           .trim()
@@ -190,26 +193,23 @@ export async function runPage(
           .replace(/[_-]+/g, " ")
           .replace(/\s+/g, " ")
           .trim();
-        return (
-          n === "full ux pilio project prompt" ||
-          n === "full uxpilot project prompt"
-        );
+        return n === "full ux pilio project prompt" || n === "full uxpilot project prompt";
       });
 
       if (promptHeaderName) {
         await googleSheetService.updateColumnByHeader(
           row.rowNumber,
           promptHeaderName,
-          fullPrompt
+          fullProjectPrompt
         );
       } else {
-        await googleSheetService.updateRow(
-          row.rowNumber,
-          { fullUxPilotProjectPrompt: fullPrompt }
-        );
+        await googleSheetService.updateRow(row.rowNumber, {
+          fullUxPilotProjectPrompt: fullProjectPrompt,
+        });
       }
 
-      row.fullUxPilotProjectPrompt = fullPrompt;
+      row.fullUxPilotProjectPrompt = fullProjectPrompt;
+
     }
   );
 
