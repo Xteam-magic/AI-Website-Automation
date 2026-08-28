@@ -163,7 +163,8 @@ export async function runPage(
     designSystem: row.designSystem,
     fullProjectDoc: row.fullProjectDoc,
     pageName: pageSpec.page,
-    pageDescription: pageSpec.prompt?.trim() || pageSpec.description,
+    pageDescription: pageSpec.description,
+    pagePrompt: pageSpec.prompt,
     pageIndex,
     totalPages,
     edits: editsText,
@@ -180,55 +181,36 @@ export async function runPage(
     prompt,
     row.requiredProjectLevel,
     async (fullPrompt) => {
-      const promptHeader =
-        `===== PAGE ${pageIndex}/${totalPages}: ${pageSpec.page} =====`;
-      const promptBlock =
-        `${promptHeader}\n${fullPrompt}`;
+      // Keep the sheet column as the exact merged prompt for the page being
+      // processed now. Previous pages must not leak into the current page
+      // prompt, so the next page replaces this value.
+      const promptHeaderName = row.headers.find((header) => {
+        const n = header
+          .trim()
+          .toLowerCase()
+          .replace(/[_-]+/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        return (
+          n === "full ux pilio project prompt" ||
+          n === "full uxpilot project prompt"
+        );
+      });
 
-      const existingPrompt =
-        row.fullUxPilotProjectPrompt?.trim() || "";
+      if (promptHeaderName) {
+        await googleSheetService.updateColumnByHeader(
+          row.rowNumber,
+          promptHeaderName,
+          fullPrompt
+        );
+      } else {
+        await googleSheetService.updateRow(
+          row.rowNumber,
+          { fullUxPilotProjectPrompt: fullPrompt }
+        );
+      }
 
-      const promptBlocks = existingPrompt
-        ? existingPrompt
-            .split(/\n\n===== PAGE /)
-            .map((block, index) =>
-              index === 0
-                ? block
-                : `===== PAGE ${block}`
-            )
-            .filter(Boolean)
-        : [];
-      const filteredPromptBlocks = promptBlocks.filter(
-        (block) => !block.startsWith(promptHeader)
-      );
-      const fullProjectPrompt =
-        [...filteredPromptBlocks, promptBlock].join("\n\n");
-
-      // Persist the exact prompt that is actually sent to the UXPilot composer.
-      // Prefer the exact live header returned by Google Sheets so capitalization
-      // or minor naming differences in the admin-created column do not prevent
-      // the write. Fall back to the typed header mapping for the known column.
-      const promptHeaderName =
-        row.headers.find((header) => {
-          const normalized = header
-            .trim()
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, "");
-          return (
-            normalized === "fulluxpilotprojectprompt" ||
-            normalized === "fulluxpilioprojectprompt"
-          );
-        }) ?? "Full ux pilio project prompt";
-
-      await googleSheetService.updateColumnByHeader(
-        row.rowNumber,
-        promptHeaderName,
-        fullProjectPrompt
-      );
-
-      row.fullUxPilotProjectPrompt =
-        fullProjectPrompt;
-      row.rawColumns[promptHeaderName] = fullProjectPrompt;
+      row.fullUxPilotProjectPrompt = fullPrompt;
     }
   );
 
