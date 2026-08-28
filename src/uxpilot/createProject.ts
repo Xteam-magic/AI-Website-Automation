@@ -208,6 +208,15 @@ function collectAdditionalDesignContext(row: ProjectRow): Array<[string, string]
     "edit after design",
   ];
 
+  // Explicit implementation/debug columns that must never enter UXPilot
+  // visual-design context, even when they are otherwise unknown headers.
+  const excludedExactDesignHeaders = new Set([
+    "feature",
+    "plugin",
+    "debug",
+    "edit",
+  ]);
+
   const designTokens = [
     "content",
     "copy",
@@ -254,6 +263,7 @@ function collectAdditionalDesignContext(row: ProjectRow): Array<[string, string]
   for (const [header, rawValue] of Object.entries(rawColumns)) {
     const normalized = normalizeHeader(header);
     if (!normalized || knownHeaders.has(normalized)) continue;
+    if (excludedExactDesignHeaders.has(normalized)) continue;
     if (excludedTokens.some((token) => normalized.includes(token))) continue;
     if (!designTokens.some((token) => normalized.includes(token))) continue;
 
