@@ -92,15 +92,15 @@ async function waitForPromptInput(page: Page): Promise<ReturnType<Page["locator"
 
 async function setFinalPageInstruction(page: Page, text: string): Promise<void> {
   let input = await waitForPromptInput(page);
-  await input.click().catch(() => undefined);
+  const normalizedTarget = text.replace(/\r\n/g, "\n").trim();
+
+  await input.click();
   await input.fill(text).catch(() => undefined);
 
-  const read = async () => (await composerValue(page)).replace(/\r\n/g, "\n").trim();
-  const target = text.replace(/\r\n/g, "\n").trim();
+  const read = async () =>
+    (await composerValue(page)).replace(/\r\n/g, "\n").trim();
 
-  if ((await read()) === target) {
-    return;
-  }
+  if ((await read()) === normalizedTarget) return;
 
   await input.evaluate((element, value) => {
     const textarea = element as HTMLTextAreaElement;
@@ -113,23 +113,37 @@ async function setFinalPageInstruction(page: Page, text: string): Promise<void> 
     textarea.dispatchEvent(new Event("change", { bubbles: true }));
   }, text).catch(() => undefined);
 
-  if ((await read()) === target) return;
+  if ((await read()) === normalizedTarget) return;
 
   input = await waitForPromptInput(page);
-  await input.click().catch(() => undefined);
+  await input.click();
   await input.press("Control+A").catch(() => undefined);
   await input.press("Backspace").catch(() => undefined);
-  await page.keyboard.insertText(text).catch(() => undefined);
+  await input.press("Control+V").catch(() => undefined);
 
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
-    if ((await read()) === target) return;
+    if ((await read()) === normalizedTarget) return;
     await page.waitForTimeout(250);
   }
 
   throw new Error(
     "UXPilot final page instruction could not be inserted into the main composer."
   );
+}
+
+async function waitForSendButtonReady(page: Page): Promise<ReturnType<Page["locator"]>> {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const buttons = page.locator('button[aria-label="Send"]:visible');
+    const count = await buttons.count().catch(() => 0);
+    for (let i = count - 1; i >= 0; i--) {
+      const button = buttons.nth(i);
+      if (await button.isEnabled().catch(() => false)) return button;
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error("UXPilot Send button did not become visible and enabled after the final instruction was inserted.");
 }
 
 async function getGeneratedLabelCount(page: Page): Promise<number> {
@@ -150,19 +164,11 @@ async function hasRealGenerationArtifact(
 
   const exportVisible =
     (await selectors.copyExportControls(page).count()) > 0 &&
-    (await selectors.copyExportControls(page)
-      .first()
-      .isVisible()
-      .catch(() => false));
-  if (exportVisible && baselineSourceCode === 0) return true;
+    (await selectors.copyExportControls(page).first().isVisible().catch(() => false));
 
-  const previewVisible =
-    (await selectors.previewFrame(page).count()) > 0 &&
-    (await selectors.previewFrame(page)
-      .first()
-      .isVisible()
-      .catch(() => false));
-  return previewVisible;
+  // The initial UXPilot workspace already contains the canvas/preview, so those
+  // generic elements are NOT considered proof that generation completed.
+  return exportVisible && baselineSourceCode === 0;
 }
 
 async function waitForGenerationToFinish(
@@ -174,14 +180,21 @@ async function waitForGenerationToFinish(
   const startedAt = Date.now();
   let lastLogAt = startedAt;
   let artifactSeen = false;
+  let generationStarted = false;
 
   while (true) {
     const stopVisible = await selectors.stopButton(page).first().isVisible().catch(() => false);
     const spinnerVisible = await selectors.spinner(page).first().isVisible().catch(() => false);
+    const statusVisible = await selectors.generationStatusText(page).first().isVisible().catch(() => false);
+
+    if (stopVisible || spinnerVisible || statusVisible) generationStarted = true;
+
     if (await hasRealGenerationArtifact(page, baselineLabels, baselineSourceCode)) {
       artifactSeen = true;
     }
 
+    // We need an actual generated artifact. If generation-status UI is absent,
+    // an artifact appearing is still sufficient; the old starter canvas is not.
     if (artifactSeen && !stopVisible && !spinnerVisible) {
       const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
       log.info(`${label} finished after ${elapsedSeconds}s.`);
@@ -191,7 +204,8 @@ async function waitForGenerationToFinish(
     const now = Date.now();
     if (now - lastLogAt >= 30_000) {
       log.info(
-        `${label} is still running after ${Math.round((now - startedAt) / 1000)}s. Waiting for genuine completion...`
+        `${label} is still running after ${Math.round((now - startedAt) / 1000)}s. ` +
+        `generationStarted=${generationStarted}, artifactSeen=${artifactSeen}. Waiting for completion...`
       );
       lastLogAt = now;
     }
@@ -204,23 +218,22 @@ async function clickSendAndWait(page: Page, label: string): Promise<void> {
   const baselineLabels = await getGeneratedLabelCount(page);
   const baselineSourceCode = await getSourceCodeCount(page);
 
-  const send = selectors.sendButton(page);
-  await send.waitFor({ state: "visible", timeout: 30_000 });
-
-  const enabledDeadline = Date.now() + 30_000;
-  while (Date.now() < enabledDeadline) {
-    if (await send.isEnabled().catch(() => false)) break;
-    await page.waitForTimeout(250);
-  }
-  if (!(await send.isEnabled().catch(() => false))) {
-    throw new Error("UXPilot Send button remained disabled after the composer became visible.");
-  }
-
+  const send = await waitForSendButtonReady(page);
   log.info('[UXPilot/Generate] Send button is visible and enabled. Clicking Send...');
-  await send.scrollIntoViewIfNeeded().catch(() => undefined);
-  await send.click();
-  log.info('[UXPilot/Generate] Send clicked successfully. Waiting for generation to finish...');
 
+  await send.scrollIntoViewIfNeeded().catch(() => undefined);
+  try {
+    await send.click({ timeout: 10_000 });
+  } catch (error) {
+    log.warn(
+      `Normal Send click failed; invoking the exact aria-label=Send button through the page DOM: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+    await send.evaluate((element) => (element as HTMLButtonElement).click());
+  }
+
+  log.info('[UXPilot/Generate] Send clicked successfully. Waiting for generation to finish...');
   await waitForGenerationToFinish(
     page,
     label,
@@ -239,7 +252,6 @@ async function attemptGenerateDesktop(
 
   const projectContext = await getStoredProjectContext(page);
   const attachmentInstruction = [
-    "",
     "ATTACHED DOCUMENT INSTRUCTION:",
     "Please carefully review ALL contents of the attached document(s), including every requirement, note, explanation, content item, visual reference, constraint, and project detail. Use all relevant information from the attached document(s) when designing this page. Do not ignore, omit, or summarize away any important instruction or content from the attachment(s). Treat the attached document(s) as authoritative project material.",
   ].join("\n");
@@ -250,23 +262,27 @@ async function attemptGenerateDesktop(
     attachmentInstruction,
   ].join("\n\n");
 
-  // This is the canonical merged project/page prompt recorded in the sheet.
-  // The project-wide portion may be represented by UXPilot as an attached
-  // document, while the current page instruction is typed into the composer.
+  // This is the canonical merged prompt. Persist it BEFORE touching the main
+  // page composer so the sheet always contains the exact logical prompt that
+  // will be used for this page.
   const finalLogicalPrompt = projectContext
     ? `${projectContext}\n\n${pageInstruction}`
     : pageInstruction;
 
-  await setFinalPageInstruction(page, pageInstruction);
-  await waitForComposerUploads(page);
-
   if (onPromptReady) {
+    log.info("Saving Full UXPilot Project Prompt to Google Sheet before the page instruction is pasted into the composer...");
     await onPromptReady(finalLogicalPrompt);
   }
+
+  // Only after the sheet write succeeds do we place the page instruction into
+  // the visible main input.
+  await setFinalPageInstruction(page, pageInstruction);
+  await waitForComposerUploads(page);
 
   await saveGenerationInputScreenshot(page);
   await clickSendAndWait(page, "desktop generation");
 }
+
 
 export async function generateDesktop(
   page: Page,
