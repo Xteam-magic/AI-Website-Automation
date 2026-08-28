@@ -66,6 +66,46 @@ async function getStoredProjectContext(page: Page): Promise<string> {
   }
 }
 
+function extractCurrentPageName(prompt: string): string {
+  const match = prompt.match(/(?:^|\n)Current Page:\s*(.+)\s*$/im);
+  return match?.[1]?.trim() || "";
+}
+
+function scopeProjectContextToCurrentPage(
+  projectContext: string,
+  currentPageName: string
+): string {
+  if (!projectContext || !currentPageName) return projectContext;
+
+  const pagesMatch = projectContext.match(
+    /(\nPAGES:\n)([\s\S]*?)(\nCOUNT PAGE:)/i
+  );
+  if (!pagesMatch) return projectContext;
+
+  try {
+    const parsed = JSON.parse(pagesMatch[2].trim());
+    if (Array.isArray(parsed)) {
+      const currentPage = parsed.find(
+        (item) =>
+          String(item?.page ?? item?.name ?? item?.title ?? "")
+            .trim()
+            .toLowerCase() === currentPageName.trim().toLowerCase()
+      );
+
+      if (currentPage) {
+        return projectContext.replace(
+          pagesMatch[2],
+          JSON.stringify([currentPage], null, 2)
+        );
+      }
+    }
+  } catch {
+    // Keep the full project context if the Pages value is not JSON.
+  }
+
+  return projectContext;
+}
+
 async function composerValue(page: Page): Promise<string> {
   const input = selectors.promptInput(page).last();
   return input
@@ -238,24 +278,28 @@ async function attemptGenerateDesktop(
   await waitForComposerUploads(page);
 
   const projectContext = await getStoredProjectContext(page);
+  const currentPageName = extractCurrentPageName(prompt);
+  const pageScopedProjectContext = scopeProjectContextToCurrentPage(
+    projectContext,
+    currentPageName
+  );
+
   const attachmentInstruction = [
-    "",
     "ATTACHED DOCUMENT INSTRUCTION:",
     "Please carefully review ALL contents of the attached document(s), including every requirement, note, explanation, content item, visual reference, constraint, and project detail. Use all relevant information from the attached document(s) when designing this page. Do not ignore, omit, or summarize away any important instruction or content from the attachment(s). Treat the attached document(s) as authoritative project material.",
   ].join("\n");
 
-  const pageInstruction = [
-    "CURRENT PAGE PROMPT:",
-    prompt.trim(),
-    attachmentInstruction,
-  ].join("\n\n");
+  // This is the canonical merged logical prompt recorded in Google Sheet. It
+  // is page-scoped: the Pages section contains only the current page item.
+  // The actual large project context remains the already-attached UXPilot
+  // document to preserve the stable upload flow.
+  const finalLogicalPrompt = pageScopedProjectContext
+    ? `${pageScopedProjectContext}\n\nCURRENT PAGE PROMPT:\n${prompt.trim()}\n\n${attachmentInstruction}`
+    : `${prompt.trim()}\n\n${attachmentInstruction}`;
 
-  // This is the canonical merged project/page prompt recorded in the sheet.
-  // The project-wide portion may be represented by UXPilot as an attached
-  // document, while the current page instruction is typed into the composer.
-  const finalLogicalPrompt = projectContext
-    ? `${projectContext}\n\n${pageInstruction}`
-    : pageInstruction;
+  // After the large attachment has finished uploading, UXPilot only needs a
+  // short instruction in the composer to act on the attached document.
+  const pageInstruction = "Design based on the attached document";
 
   // Persist the exact final logical prompt BEFORE touching the visible main
   // composer. This makes the Sheet the source of truth for exactly what is
