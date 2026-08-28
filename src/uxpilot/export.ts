@@ -153,6 +153,7 @@ async function isDesignToolbarVisible(
     (value) =>
       /source.*code/.test(value) ||
       /lucide[-\s]?code/.test(value) ||
+      /lucide[-\s]?globe/.test(value) ||
       /copy.*export/.test(value) ||
       /copy\/export/.test(value)
   );
@@ -899,217 +900,299 @@ async function captureSourceCodeDownload(
 }
 
 /**
- * Current live UXPilot route:
- * Select design -> Zoom Out -> Select design -> scroll ->
- * Select design -> Source Code -> Copy.
- *
- * The close operation is intentionally outside the retry so a successful
- * HTML capture can never cause repeated copy/open cycles.
+ * Publish the selected generated UXPilot page, open the published page in a
+ * fresh tab, open the browser-equivalent `view-source:` route, and return the
+ * raw HTML source. UXPilot's Source Code panel is intentionally not used here
+ * because it requires a paid tier in the customer's current account.
  */
-export async function copyAsHtml(
-  page: Page
-): Promise<string> {
-  log.info(
-    "Copying generated design HTML from Source Code..."
-  );
+async function publishAndCaptureRawHtml(
+  page: Page,
+  pageName: string
+): Promise<{ publishedUrl: string; html: string }> {
+  const globeButton = page.locator(
+    'button:has(svg.lucide-globe):visible'
+  ).first();
 
-  const html = await retry(
-    async () => {
-      await openSourceCodePanel(
-        page
-      );
+  await globeButton.waitFor({ state: "visible", timeout: 10_000 });
+  await globeButton.click();
+  log.info("Globe/publish button clicked. Waiting for Publish Settings...");
 
-      let capturedHtml = "";
+  const publishHeading = page.getByText(/^Publish Settings$/i).first();
+  await publishHeading.waitFor({ state: "visible", timeout: 10_000 });
 
-      try {
-        capturedHtml =
-          await captureSourceCodeCopy(
-            page
-          );
-      } catch (copyError) {
-        log.warn(
-          `Source Code copy failed, trying download fallback: ${
-            copyError instanceof Error
-              ? copyError.message
-              : String(copyError)
-          }`
-        );
+  const statusPublished = page.getByText(/^Published$/i).first();
+  const statusNotPublished = page.getByText(/^Not published$/i).first();
 
-        capturedHtml =
-          await captureSourceCodeDownload(
-            page
-          );
+  if (await statusNotPublished.isVisible().catch(() => false)) {
+    const publishButton = page.getByRole("button", { name: /^Publish$/i }).last();
+    await publishButton.waitFor({ state: "visible", timeout: 10_000 });
+    await publishButton.click();
+    log.info(`Publishing "${pageName}"...`);
+
+    await waitUntil(
+      async () => await statusPublished.isVisible().catch(() => false),
+      {
+        timeoutMs: 60_000,
+        intervalMs: 500,
+        label: "published status",
       }
-
-      if (
-        !capturedHtml ||
-        capturedHtml.trim().length === 0
-      ) {
-        throw new Error(
-          "Source Code returned empty HTML."
-        );
+    );
+  } else {
+    await waitUntil(
+      async () =>
+        (await statusPublished.isVisible().catch(() => false)) ||
+        (await statusNotPublished.isVisible().catch(() => false)),
+      {
+        timeoutMs: 10_000,
+        intervalMs: 250,
+        label: "publish status",
       }
-
-      log.info(
-        `HTML captured successfully (${capturedHtml.length} characters).`
-      );
-
-      return capturedHtml;
-    },
-    {
-      retries:
-        config.retries.clipboard,
-      label:
-        "Source Code HTML export",
-    }
-  );
-
-  // Return immediately after the HTML is captured.
-  // The caller saves the file and updates Google Sheets before any Figma work.
-  // The Source Code panel is closed only when the Figma step starts.
-  return html;
-}
-
-/**
- * Select the generated design -> open UXPilot Export -> choose Figma under
- * COPY TO -> click the bottom "Export 1 screen" action -> wait for the
- * "1 screen copied! Paste to Figma ..." notification.
- */
-export async function copyToFigma(
-  page: Page
-): Promise<void> {
-  log.info("Copying design to Figma...");
-
-  // Source Code may still be open after HTML capture.
-  await closeSourceCodePanel(page);
-
-  // Re-attach the floating toolbar to the actual generated screen.
-  await prepareDesignToolbarForSourceCode(page);
-
-  // Open the UXPilot Export panel from the selected design toolbar.
-  await clickIconButtonByHint(
-    page,
-    [
-      /^export$/i,
-      /copy.*export/i,
-      /copy\/export/i,
-    ],
-    "Export"
-  );
-
-  const selectedFigma = await page.evaluate(() => {
-    const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
-    const visible = (element: Element) => {
-      const rect = element.getBoundingClientRect();
-      const style = window.getComputedStyle(element);
-      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-    };
-
-    const exactFigmaNodes = Array.from(document.querySelectorAll("*"))
-      .filter((element) => visible(element) && normalize(element.textContent || "") === "Figma");
-
-    for (const node of exactFigmaNodes) {
-      // Reject a nested "Figma" word that belongs to a longer Export To card such
-      // as "Figma (Nodey plugin)" or "Figma (FIG file)". The correct COPY TO
-      // option has a smallest clickable/card ancestor whose full visible text is
-      // exactly "Figma".
-      let card: HTMLElement | null = null;
-      let cursor: HTMLElement | null = node as HTMLElement;
-      for (let depth = 0; depth < 7 && cursor; depth++, cursor = cursor.parentElement) {
-        const cardText = normalize(cursor.innerText || cursor.textContent || "");
-        const hasControl = Boolean(
-          cursor.matches('label, button, [role="radio"]') ||
-          cursor.querySelector('input[type="radio"], [role="radio"], button')
-        );
-        if (cardText === "Figma" && hasControl) {
-          card = cursor;
-          break;
-        }
-      }
-
-      if (!card) continue;
-
-      let inCopyTo = false;
-      let section: HTMLElement | null = card;
-      for (let depth = 0; depth < 9 && section; depth++, section = section.parentElement) {
-        const sectionText = normalize(section.innerText || section.textContent || "");
-        if (/^COPY TO\b/i.test(sectionText) || /\bCOPY TO\b/i.test(sectionText)) {
-          inCopyTo = true;
-          break;
-        }
-      }
-      if (!inCopyTo) continue;
-
-      (card as HTMLElement).click();
-
-      const checked = Boolean(
-        card.querySelector('input[type="radio"]:checked, [role="radio"][aria-checked="true"]')
-      );
-      const classText = `${card.className || ""} ${card.parentElement?.className || ""}`;
-      const selectedState = /selected|active|checked/i.test(classText);
-
-      if (!checked && !selectedState) {
-        const label = card.closest('label') as HTMLElement | null;
-        if (label && label !== card) label.click();
-      }
-
-      return true;
-    }
-
-    return false;
-  });
-
-  if (!selectedFigma) {
-    throw new Error(
-      "Could not select the standalone Figma option under COPY TO. Export options such as Figma (Nodey plugin) are intentionally excluded."
     );
   }
 
-  log.info("Selected standalone Figma under COPY TO (Figma Nodey plugin excluded).");
+  if (!(await statusPublished.isVisible().catch(() => false))) {
+    throw new Error(`UXPilot page "${pageName}" is not published.`);
+  }
 
-  const exportScreenButton = page.getByRole(
-    "button",
-    { name: /export\s+1\s+screen/i }
-  ).or(
-    page.getByText(/export\s+1\s+screen/i)
-  ).last();
+  const copyLinkButton = page.locator('button[title="Copy Link"]:visible').last();
+  await copyLinkButton.waitFor({ state: "visible", timeout: 10_000 });
 
-  await exportScreenButton.waitFor({
-    state: "visible",
-    timeout: 10000,
+  let publishedUrl = "";
+
+  publishedUrl = await page.evaluate(() => {
+    const visible = (el: Element) => {
+      const h = el as HTMLElement;
+      const r = h.getBoundingClientRect();
+      const s = window.getComputedStyle(h);
+      return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden";
+    };
+    const values = Array.from(document.querySelectorAll("input"))
+      .filter(visible)
+      .map((input) => (input as HTMLInputElement).value.trim())
+      .filter((value) => /^https?:\/\//i.test(value));
+    return values[values.length - 1] || "";
   });
 
-  await exportScreenButton.click();
+  await copyLinkButton.click();
 
+  if (!publishedUrl) {
+    try {
+      publishedUrl = await page.evaluate(async () => navigator.clipboard.readText());
+    } catch {
+      publishedUrl = "";
+    }
+  }
+
+  publishedUrl = publishedUrl.trim();
+  if (!/^https?:\/\//i.test(publishedUrl)) {
+    throw new Error(`Could not retrieve published URL for "${pageName}".`);
+  }
+
+  log.info(`Published URL for "${pageName}": ${publishedUrl}`);
+
+  // Close the publish dialog before opening the published URL in a separate tab.
+  const closeButton = page.locator(
+    'button:has(svg.lucide-x):visible'
+  ).last();
+  if (await closeButton.count()) {
+    await closeButton.click().catch(() => undefined);
+  }
+
+  const sourcePage = await page.context().newPage();
+  try {
+    await sourcePage.goto(publishedUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 60_000,
+    });
+    await sourcePage.waitForLoadState("networkidle").catch(() => undefined);
+    await sourcePage.waitForTimeout(1_000);
+
+    // Browser menus (right-click -> View page source) are outside Playwright's
+    // page DOM. The browser's exact equivalent is the view-source: URL, which
+    // opens the same raw source document without depending on Chrome UI menus.
+    await sourcePage.goto(`view-source:${publishedUrl}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 60_000,
+    });
+
+    await waitUntil(
+      async () => {
+        const text = await sourcePage.locator("body").innerText().catch(() => "");
+        return text.trim().length > 0;
+      },
+      {
+        timeoutMs: 30_000,
+        intervalMs: 500,
+        label: "raw page source to load",
+      }
+    );
+
+    const html = await sourcePage.locator("body").innerText();
+    if (!html.trim()) {
+      throw new Error(`View-source returned empty HTML for "${pageName}".`);
+    }
+
+    log.info(`Raw published HTML captured for "${pageName}" (${html.length} characters).`);
+    return { publishedUrl, html };
+  } finally {
+    await sourcePage.close().catch(() => undefined);
+  }
+}
+
+async function selectGeneratedPageByName(
+  page: Page,
+  pageName: string
+): Promise<void> {
+  const normalizedTarget = pageName.replace(/\s+/g, " ").trim().toLowerCase();
+  const labels = page.locator('div.tl-frame-label:visible');
+  const count = await labels.count();
+
+  for (let i = 0; i < count; i++) {
+    const label = labels.nth(i);
+    const text = (await label.innerText().catch(() => "")).replace(/\s+/g, " ").trim().toLowerCase();
+    if (!text) continue;
+
+    const matches =
+      text === normalizedTarget ||
+      text.endsWith(`- ${normalizedTarget}`) ||
+      text.includes(`- ${normalizedTarget}`);
+
+    if (!matches) continue;
+
+    log.info(`Selecting generated page "${pageName}"...`);
+    await label.scrollIntoViewIfNeeded().catch(() => undefined);
+
+    try {
+      await label.click({ timeout: 5_000 });
+    } catch {
+      try {
+        await label.click({ timeout: 5_000, force: true });
+      } catch {
+        await label.evaluate((el) => {
+          (el as HTMLElement).dispatchEvent(new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+          }));
+        });
+      }
+    }
+
+    await waitUntil(
+      async () => await isDesignToolbarVisible(page),
+      {
+        timeoutMs: 7_000,
+        intervalMs: 250,
+        label: `UXPilot toolbar after selecting ${pageName}`,
+      }
+    );
+
+    log.info(`Generated page "${pageName}" selected successfully.`);
+    return;
+  }
+
+  throw new Error(`Could not locate generated page frame "${pageName}".`);
+}
+
+/**
+ * New HTML export path for the current UXPilot account:
+ * select generated design -> globe/publish -> publish if needed -> Copy Link
+ * -> open published URL -> view-source -> capture complete raw HTML.
+ */
+export async function copyAsHtml(
+  page: Page,
+  pageName?: string
+): Promise<{ publishedUrl: string; html: string }> {
   log.info(
-    "Clicked 'Export 1 screen'. Waiting for the Figma copy confirmation..."
+    `Exporting published HTML${pageName ? ` for "${pageName}"` : ""}...`
   );
 
-  await waitUntil(
-    async () => {
-      const copiedToast = page.getByText(
-        /1\s+screen\s+copied/i
-      ).or(
-        page.getByText(
-          /paste\s+to\s+figma/i
-        )
-      );
+  if (pageName) {
+    await selectGeneratedPageByName(page, pageName);
+  } else {
+    await selectGeneratedDesign(page);
+  }
 
-      return (
-        (await copiedToast.count()) > 0 &&
-        (await copiedToast.last().isVisible().catch(() => false))
-      );
-    },
+  return retry(
+    async () => publishAndCaptureRawHtml(page, pageName || "current page"),
     {
-      timeoutMs:
-        config.timeouts.figmaCopyToastMs,
-      intervalMs: 500,
-      label:
-        '"1 screen copied" Figma notification',
+      retries: config.retries.clipboard,
+      label: "Published page raw HTML export",
+    }
+  );
+}
+
+/**
+ * New Figma path requested for the current UXPilot UI:
+ * select page -> top-right Export -> Image -> Copy 1 screen -> wait for
+ * successful copy notification. The caller then pastes the clipboard into
+ * the configured Figma file.
+ */
+export async function copyToFigma(
+  page: Page,
+  pageName?: string
+): Promise<void> {
+  log.info(`Copying ${pageName ? `"${pageName}" ` : ""}design to Figma via Image export...`);
+
+  if (pageName) {
+    await selectGeneratedPageByName(page, pageName);
+  } else {
+    await selectGeneratedDesign(page);
+  }
+
+  const exportButton = page
+    .getByRole("button", { name: /^Export$/i })
+    .last();
+  await exportButton.waitFor({ state: "visible", timeout: 10_000 });
+  await exportButton.click();
+  log.info("Top-right UXPilot Export button clicked.");
+
+  const imageLabel = page
+    .locator('label')
+    .filter({ has: page.getByText(/^Image$/i) })
+    .last();
+  await imageLabel.waitFor({ state: "visible", timeout: 10_000 });
+  await imageLabel.click();
+
+  const imageRadio = imageLabel.locator('input[type="radio"]');
+  await waitUntil(
+    async () => await imageRadio.isChecked().catch(() => false),
+    {
+      timeoutMs: 5_000,
+      intervalMs: 250,
+      label: "Image export option selected",
     }
   );
 
-  log.info(
-    'Received "1 screen copied" notification. Paste to Figma can continue.'
+  const copyScreenButton = page.getByRole(
+    "button",
+    { name: /^Copy\s+1\s+screen$/i }
+  ).last();
+  await copyScreenButton.waitFor({ state: "visible", timeout: 10_000 });
+
+  await waitUntil(
+    async () => await copyScreenButton.isEnabled().catch(() => false),
+    {
+      timeoutMs: 10_000,
+      intervalMs: 250,
+      label: "Copy 1 screen button enabled",
+    }
   );
+
+  await copyScreenButton.click();
+  log.info("Clicked 'Copy 1 screen'. Waiting for successful copy notification...");
+
+  await waitUntil(
+    async () => {
+      const body = await page.locator("body").innerText().catch(() => "");
+      return /1\s+screen\s+copied/i.test(body);
+    },
+    {
+      timeoutMs: config.timeouts.figmaCopyToastMs,
+      intervalMs: 500,
+      label: 'Figma image copy confirmation',
+    }
+  );
+
+  log.info('Figma image export copied successfully; clipboard is ready for Figma paste.');
 }
