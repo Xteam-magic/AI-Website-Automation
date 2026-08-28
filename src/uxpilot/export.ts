@@ -1002,28 +1002,25 @@ export async function copyToFigma(
     const visible = (element: Element) => {
       const rect = element.getBoundingClientRect();
       const style = window.getComputedStyle(element);
-      return (
-        rect.width > 0 &&
-        rect.height > 0 &&
-        style.display !== "none" &&
-        style.visibility !== "hidden"
-      );
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
     };
 
     const exactFigmaNodes = Array.from(document.querySelectorAll("*"))
       .filter((element) => visible(element) && normalize(element.textContent || "") === "Figma");
 
     for (const node of exactFigmaNodes) {
+      // Reject a nested "Figma" word that belongs to a longer Export To card such
+      // as "Figma (Nodey plugin)" or "Figma (FIG file)". The correct COPY TO
+      // option has a smallest clickable/card ancestor whose full visible text is
+      // exactly "Figma".
       let card: HTMLElement | null = null;
       let cursor: HTMLElement | null = node as HTMLElement;
-
-      for (let depth = 0; depth < 8 && cursor; depth++, cursor = cursor.parentElement) {
+      for (let depth = 0; depth < 7 && cursor; depth++, cursor = cursor.parentElement) {
         const cardText = normalize(cursor.innerText || cursor.textContent || "");
         const hasControl = Boolean(
           cursor.matches('label, button, [role="radio"]') ||
           cursor.querySelector('input[type="radio"], [role="radio"], button')
         );
-
         if (cardText === "Figma" && hasControl) {
           card = cursor;
           break;
@@ -1034,14 +1031,13 @@ export async function copyToFigma(
 
       let inCopyTo = false;
       let section: HTMLElement | null = card;
-      for (let depth = 0; depth < 10 && section; depth++, section = section.parentElement) {
+      for (let depth = 0; depth < 9 && section; depth++, section = section.parentElement) {
         const sectionText = normalize(section.innerText || section.textContent || "");
-        if (/\bCOPY TO\b/i.test(sectionText)) {
+        if (/^COPY TO\b/i.test(sectionText) || /\bCOPY TO\b/i.test(sectionText)) {
           inCopyTo = true;
           break;
         }
       }
-
       if (!inCopyTo) continue;
 
       (card as HTMLElement).click();
@@ -1053,7 +1049,7 @@ export async function copyToFigma(
       const selectedState = /selected|active|checked/i.test(classText);
 
       if (!checked && !selectedState) {
-        const label = card.closest("label") as HTMLElement | null;
+        const label = card.closest('label') as HTMLElement | null;
         if (label && label !== card) label.click();
       }
 
