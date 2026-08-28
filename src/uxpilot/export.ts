@@ -23,8 +23,8 @@ const selectors = {
     page.getByText(/design copied/i).first(),
 
   generatedDesignLabels: (page: Page) =>
-    page.getByText(
-      /^[^\n-]+-\s*(landing|home|pricing|dashboard|about|contact|blog)/i
+    page.locator(
+      'div.tl-frame-label'
     ),
 };
 
